@@ -10,7 +10,7 @@ def test_health_check_endpoint():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
-    assert "DEMO_DATA" in data["data_mode"]
+    assert data["data_mode"] in ("DEMO_DATA", "LIVE_AUTHORISED_DATA")
 
 
 def test_overview_endpoint():
@@ -21,8 +21,8 @@ def test_overview_endpoint():
     assert "open_positions" in data
     assert "market_watch" in data
     assert "system_status" in data
-    assert data["system_status"]["data_mode"] == "DEMO_DATA"
-    assert "DEMO MODE" in data["system_status"]["status_message"]
+    assert data["system_status"]["data_mode"] in ("DEMO_DATA", "LIVE_AUTHORISED_DATA")
+    assert any(keyword in data["system_status"]["status_message"] for keyword in ("DEMO", "CONNECTED", "STANDBY"))
 
     # Check that Bitcoin and Indian indices are present
     symbols = [m["symbol"] for m in data["market_watch"]]

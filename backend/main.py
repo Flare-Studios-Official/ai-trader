@@ -8,6 +8,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 import os
 from typing import Any, Dict, Optional
+from dotenv import load_dotenv
+
+# Load local environment configuration
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 import pandas as pd
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware

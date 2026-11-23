@@ -56,16 +56,41 @@ class AngelOneClient:
                 setting = db.query(SystemSetting).filter(SystemSetting.key == "angel_one_session").first()
                 if setting and setting.value:
                     data = json.loads(setting.value)
-                    self.jwt_token = data.get("jwt_token")
-                    self.refresh_token = data.get("refresh_token")
-                    self.feed_token = data.get("feed_token")
-                    if self.jwt_token:
+                    token = data.get("jwt_token")
+                    if token and token != "mock_jwt" and len(token) > 20:
+                        self.jwt_token = token
+                        self.refresh_token = data.get("refresh_token")
+                        self.feed_token = data.get("feed_token")
                         self.is_authenticated = True
                         logger.info("Loaded persisted Angel One session tokens from database.")
             finally:
                 db.close()
         except Exception as e:
             logger.debug(f"Could not load persisted Angel One session: {e}")
+
+    def _persist_session(self):
+        try:
+            from app.core.database import SessionLocal, SystemSetting
+            import json
+            db = SessionLocal()
+            try:
+                payload = json.dumps({
+                    "jwt_token": self.jwt_token,
+                    "refresh_token": self.refresh_token,
+                    "feed_token": self.feed_token,
+                    "updated_at": datetime.utcnow().isoformat()
+                })
+                setting = db.query(SystemSetting).filter(SystemSetting.key == "angel_one_session").first()
+                if setting:
+                    setting.value = payload
+                else:
+                    db.add(SystemSetting(key="angel_one_session", value=payload, description="Angel One SmartAPI Session Tokens"))
+                db.commit()
+                logger.info("Persisted live Angel One session tokens to database.")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"Could not persist session: {e}")
 
     def is_configured(self) -> bool:
         c = self.credentials
@@ -89,14 +114,14 @@ class AngelOneClient:
                 "X-UserType": "USER",
                 "X-SourceID": "WEB",
                 "X-ClientLocalIP": "127.0.0.1",
-                "X-ClientPublicIP": "127.0.0.1",
+                "X-ClientPublicIP": "49.43.222.66",
                 "X-MACAddress": "fe80::1",
                 "X-PrivateKey": self.credentials.api_key
             }
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 res = await client.post(
-                    f"{self.BASE_URL}/rest/auth/partner/v1/generate-service-token",
+                    f"{self.BASE_URL}/rest/auth/angelbroking/user/v1/loginByPassword",
                     json=payload,
                     headers=headers
                 )
@@ -106,6 +131,7 @@ class AngelOneClient:
                     self.refresh_token = data["data"].get("refreshToken")
                     self.feed_token = data["data"].get("feedToken")
                     self.is_authenticated = True
+                    self._persist_session()
                     logger.info("Angel One SmartAPI authenticated successfully.")
                     return True
                 else:
@@ -128,7 +154,9 @@ class AngelOneClient:
         Interval options: ONE_MINUTE, THREE_MINUTE, FIVE_MINUTE, FIFTEEN_MINUTE, ONE_HOUR, ONE_DAY.
         """
         if not self.is_authenticated:
-            return None
+            auth_ok = await self.authenticate()
+            if not auth_ok:
+                return None
 
         if not to_date:
             to_date = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -141,7 +169,7 @@ class AngelOneClient:
             "X-UserType": "USER",
             "X-SourceID": "WEB",
             "X-ClientLocalIP": "127.0.0.1",
-            "X-ClientPublicIP": "127.0.0.1",
+            "X-ClientPublicIP": os.getenv("ANGEL_CLIENT_PUBLIC_IP", "49.43.222.66"),
             "X-MACAddress": "fe80::1",
             "X-PrivateKey": self.credentials.api_key,
             "Authorization": f"Bearer {self.jwt_token}"
@@ -174,25 +202,33 @@ class AngelOneClient:
             logger.error(f"Error fetching historical candles from Angel One: {e}")
             return None
 
-    async def get_ltp(self, exchange: str, symbol_token: str, trading_symbol: str) -> Optional[float]:
+    async def get_ltp(self, exchange: str, symbol_token: str, trading_symbol: str = "") -> Optional[float]:
         """Fetches live Last Traded Price (LTP)."""
         if not self.is_authenticated:
-            return None
+            auth_ok = await self.authenticate()
+            if not auth_ok:
+                return None
 
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "X-UserType": "USER",
+            "X-SourceID": "WEB",
+            "X-ClientLocalIP": "127.0.0.1",
+            "X-ClientPublicIP": "49.43.222.66",
+            "X-MACAddress": "fe80::1",
             "X-PrivateKey": self.credentials.api_key,
             "Authorization": f"Bearer {self.jwt_token}"
         }
         payload = {
-            "exchange": exchange,
-            "tradingsymbol": trading_symbol,
-            "symboltoken": symbol_token
+            "mode": "LTP",
+            "exchangeTokens": {
+                exchange: [str(symbol_token)]
+            }
         }
 
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=6.0) as client:
                 res = await client.post(
                     f"{self.BASE_URL}/rest/secure/angelbroking/market/v1/quote",
                     json=payload,
@@ -200,8 +236,52 @@ class AngelOneClient:
                 )
                 data = res.json()
                 if data.get("status") and data.get("data", {}).get("fetched"):
-                    return float(data["data"]["fetched"]["ltp"])
+                    for item in data["data"]["fetched"]:
+                        if str(item.get("symbolToken")) == str(symbol_token):
+                            return float(item.get("ltp", 0.0))
                 return None
         except Exception as e:
             logger.error(f"Error getting LTP: {e}")
+            return None
+
+    async def get_full_quote(self, exchange: str, symbol_token: str) -> Optional[Dict[str, Any]]:
+        """Fetches full market quote data including OHLC, change, and LTP."""
+        if not self.is_authenticated:
+            auth_ok = await self.authenticate()
+            if not auth_ok:
+                return None
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-UserType": "USER",
+            "X-SourceID": "WEB",
+            "X-ClientLocalIP": "127.0.0.1",
+            "X-ClientPublicIP": "49.43.222.66",
+            "X-MACAddress": "fe80::1",
+            "X-PrivateKey": self.credentials.api_key,
+            "Authorization": f"Bearer {self.jwt_token}"
+        }
+        payload = {
+            "mode": "FULL",
+            "exchangeTokens": {
+                exchange: [str(symbol_token)]
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.post(
+                    f"{self.BASE_URL}/rest/secure/angelbroking/market/v1/quote",
+                    json=payload,
+                    headers=headers
+                )
+                data = res.json()
+                if data.get("status") and data.get("data", {}).get("fetched"):
+                    for item in data["data"]["fetched"]:
+                        if str(item.get("symbolToken")) == str(symbol_token):
+                            return item
+                return None
+        except Exception as e:
+            logger.error(f"Error getting full quote: {e}")
             return None

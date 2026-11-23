@@ -15,8 +15,14 @@ _active_provider: Optional[BaseMarketDataProvider] = None
 def get_market_data_provider() -> BaseMarketDataProvider:
     global _active_provider
     if _active_provider is None:
-        provider_type = os.getenv("MARKET_DATA_PROVIDER", "demo").lower()
-        if provider_type == "angel_one":
+        provider_type = os.getenv("MARKET_DATA_PROVIDER", "").lower()
+        angel_configured = bool(
+            os.getenv("ANGEL_API_KEY")
+            and os.getenv("ANGEL_CLIENT_CODE")
+            and os.getenv("ANGEL_PIN")
+            and os.getenv("ANGEL_TOTP_SECRET")
+        )
+        if provider_type == "angel_one" and angel_configured:
             _active_provider = AngelOneMarketDataProvider()
         else:
             _active_provider = DemoMarketDataProvider()
