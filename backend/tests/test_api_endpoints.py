@@ -71,3 +71,18 @@ def test_simulate_manual_candle():
     res = client.post("/api/simulate/candle", json={"symbol": "BTC/USDT", "direction": "BULLISH"})
     assert res.status_code == 200
     assert res.json()["status"] == "manual_candle_simulated"
+
+
+def test_angel_one_oauth_callback():
+    # Test without query params (verification ping)
+    res = client.get("/api/auth/angelone/callback")
+    assert res.status_code == 200
+    assert "text/html" in res.headers["content-type"]
+    assert "Angel One SmartAPI" in res.text
+    assert "Authentication Callback Verified" in res.text
+
+    # Test with simulated Angel One OAuth redirect tokens
+    res_with_tokens = client.get("/api/auth/angelone/callback?auth_token=mock_jwt&feed_token=mock_feed")
+    assert res_with_tokens.status_code == 200
+    assert "Session authorization tokens were received" in res_with_tokens.text
+

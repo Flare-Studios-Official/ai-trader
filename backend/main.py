@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.core.database import init_db, SessionLocal, SignalLog, TradeRecord
@@ -68,6 +69,100 @@ def root():
         "banner": orchestrator.provider.status_message,
         "supported_assets": ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "BANKEX", "BTC/USDT"]
     }
+
+
+@app.get("/api/auth/angelone/callback", response_class=HTMLResponse)
+@app.post("/api/auth/angelone/callback", response_class=HTMLResponse)
+async def angel_one_oauth_callback(
+    auth_token: Optional[str] = Query(None),
+    feed_token: Optional[str] = Query(None),
+    refreshToken: Optional[str] = Query(None),
+    state: Optional[str] = Query(None)
+):
+    """
+    Dedicated Angel One SmartAPI OAuth Redirect Callback Handler.
+    Receives authentication redirect parameters, updates in-memory provider session tokens
+    if present, and renders a secure HTML confirmation card with dashboard link.
+    """
+    has_tokens = bool(auth_token or feed_token)
+    
+    # If the active provider is Angel One, store the received session tokens
+    from app.market_data.angel_one_provider import AngelOneMarketDataProvider
+    if isinstance(orchestrator.provider, AngelOneMarketDataProvider):
+        if auth_token:
+            orchestrator.provider.client.jwt_token = auth_token
+            orchestrator.provider.client.is_authenticated = True
+        if feed_token:
+            orchestrator.provider.client.feed_token = feed_token
+        if refreshToken:
+            orchestrator.provider.client.refresh_token = refreshToken
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Angel One Authentication Callback — AI Trader</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #0B0E14;
+            color: #F3F4F6;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+        }}
+        .card {{
+            background: #151B26;
+            border: 1px solid #1F2937;
+            border-radius: 12px;
+            padding: 32px;
+            max-width: 480px;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }}
+        .badge {{
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 13px;
+            font-weight: 600;
+            background: rgba(16, 185, 129, 0.2);
+            color: #10B981;
+            margin-bottom: 16px;
+        }}
+        h1 {{ font-size: 20px; margin: 0 0 12px; font-weight: 700; }}
+        p {{ font-size: 14px; color: #9CA3AF; margin: 0 0 24px; line-height: 1.5; }}
+        .btn {{
+            display: inline-block;
+            background: #2563EB;
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            transition: background 0.2s;
+        }}
+        .btn:hover {{ background: #1D4ED8; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">Angel One SmartAPI</div>
+        <h1>Authentication Callback Verified</h1>
+        <p>
+            The Angel One SmartAPI OAuth redirect was captured successfully.<br>
+            {"Session authorization tokens were received and registered." if has_tokens else "Callback route is active and verified by AI Trader backend."}
+        </p>
+        <a href="/" class="btn">Return to AI Trader Dashboard</a>
+    </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_content, status_code=200)
+
 
 
 @app.get("/api/health")
