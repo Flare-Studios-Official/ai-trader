@@ -292,3 +292,9 @@ class AutomatedPaperTrader:
 
 
 automated_trader = AutomatedPaperTrader()
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logger.info("Starting standalone Automated Paper Trader worker...")
+    asyncio.run(automated_trader.run_loop())
+

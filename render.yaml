@@ -2,7 +2,7 @@ services:
   - type: web
     name: ai-trader-backend
     env: python
-    region: singapore # Closest to Mumbai (NSE) for low latency
+    region: singapore # Closest to Mumbai (NSE) for lowest latency
     plan: free
     buildCommand: "pip install -r backend/requirements.txt"
     startCommand: "cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT"
@@ -10,8 +10,14 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: MARKET_DATA_PROVIDER
+        value: demo
       - key: DATABASE_URL
-        value: sqlite:///./data/ai_trader.db
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
       - key: ANGEL_API_KEY
         sync: false
       - key: ANGEL_CLIENT_CODE
@@ -19,4 +25,23 @@ services:
       - key: ANGEL_PIN
         sync: false
       - key: ANGEL_TOTP_SECRET
+        sync: false
+
+  - type: worker
+    name: ai-trader-worker
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: "pip install -r backend/requirements.txt"
+    startCommand: "cd backend && python -m app.core.automated_trader"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: MARKET_DATA_PROVIDER
+        value: demo
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
         sync: false

@@ -7,10 +7,12 @@ export const OptionsScannerTab: React.FC = () => {
   const [chainData, setChainData] = useState<OptionsChainResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
+  const apiBase = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+
   const fetchChain = async (sym: string) => {
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/scanner/options?underlying=${sym}`);
+      const res = await fetch(`${apiBase}/api/scanner/options?underlying=${sym}`);
       if (res.ok) {
         const data = await res.json();
         setChainData(data);

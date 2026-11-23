@@ -102,9 +102,11 @@ export const App: React.FC = () => {
   const [isConnected, setIsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
+  const apiBase = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+
   const fetchOverview = async () => {
     try {
-      const res = await fetch('/api/overview');
+      const res = await fetch(`${apiBase}/api/overview`);
       if (res.ok) {
         const data = await res.json();
         setState(data);
@@ -117,9 +119,21 @@ export const App: React.FC = () => {
   useEffect(() => {
     fetchOverview();
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws`;
+    let wsUrl: string;
+    if (import.meta.env.VITE_API_URL) {
+      try {
+        const url = new URL(import.meta.env.VITE_API_URL);
+        const wsProto = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${wsProto}//${url.host}/ws`;
+      } catch (err) {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${protocol}//${window.location.host}/ws`;
+      }
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      wsUrl = `${protocol}//${host}/ws`;
+    }
 
     const connectWs = () => {
       try {
@@ -165,7 +179,7 @@ export const App: React.FC = () => {
 
   const handleToggleKillSwitch = async (active: boolean) => {
     try {
-      const res = await fetch('/api/risk/kill-switch', {
+      const res = await fetch(`${apiBase}/api/risk/kill-switch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active }),
@@ -180,7 +194,7 @@ export const App: React.FC = () => {
 
   const handleToggleAutomatedTrading = async (active: boolean) => {
     try {
-      const res = await fetch('/api/automated-trader/toggle', {
+      const res = await fetch(`${apiBase}/api/automated-trader/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active }),
@@ -195,7 +209,7 @@ export const App: React.FC = () => {
 
   const handleSimulateCandle = async (symbol: string, direction?: string) => {
     try {
-      const res = await fetch('/api/simulate/candle', {
+      const res = await fetch(`${apiBase}/api/simulate/candle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol, direction }),
@@ -210,7 +224,7 @@ export const App: React.FC = () => {
 
   const handleClosePosition = async (symbol: string) => {
     try {
-      const res = await fetch(`/api/positions/${symbol}/close`, { method: 'POST' });
+      const res = await fetch(`${apiBase}/api/positions/${symbol}/close`, { method: 'POST' });
       if (res.ok) {
         await fetchOverview();
       }
