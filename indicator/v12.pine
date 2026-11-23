@@ -1,7 +1,323 @@
-//@version=5
-indicator("V12 Trend Engine", overlay=true, max_lines_count=500, max_labels_count=500)
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © moizcity123
 
-// Complete source preserved exactly as in repository
-len_ema = input.int(20, "Fast EMA")
-len_slow = input.int(50, "Slow EMA")
-// ...
+//@version=6
+indicator(
+     title            = "V12",
+     shorttitle       = "V12",
+     overlay          = true,
+     max_labels_count = 500,
+     max_lines_count  = 500
+ )
+
+// ============================================================================
+// 1. INPUT SETTINGS
+// ============================================================================
+string grpCore = "⚡ V12 — Core Engine"
+int    atrLength        = input.int(10, "Adaptive Supertrend ATR Length", minval = 2, maxval = 100, group = grpCore)
+float  baseFactor       = input.float(2.0, "Base Sensitivity Factor", minval = 0.5, maxval = 10.0, step = 0.1, group = grpCore)
+bool   useAdaptive      = input.bool(true, "Enable Volatility-Adaptive Baseline", group = grpCore)
+bool   lockOnClose      = input.bool(true, "100% Non-Repainting (Lock Signals on Candle Close)", group = grpCore)
+
+string grpFuel = "⛽ V12 — Anti-3-Candle Exhaustion & Fuel Tank Engine"
+bool   blockExhaustedTop = input.bool(true, "Block Buying/Selling at 3-Candle Exhaustion Tops/Bottoms", group = grpFuel, tooltip = "Prevents triggering a BUY at the top of a 3-candle vertical pump (or SELL at the bottom of a 3-candle dump) when the move is already stretched and about to reverse.")
+float  maxFuelStretchAtr = input.float(1.85, "Max Allowed 3-Bar Stretch (ATR Multiple)", minval = 1.0, maxval = 4.0, step = 0.05, group = grpFuel, tooltip = "If price has already traveled more than this multiple of ATR over the last 3 bars, the move is flagged as Exhausted (Low Fuel Left).")
+int    wallLookback      = input.int(15, "Support / Resistance Wall Lookback (Bars)", minval = 5, maxval = 50, group = grpFuel)
+
+string grpChop = "🛡️ Smart Sideways Box & Chop Protection"
+bool   useAutoAtrChop     = input.bool(true, "Auto-Adapt Chop Filter to Any Index (ATR + Choppiness)", group = grpChop, tooltip = "Automatically scales across Nifty, BankNifty, and US 100 without punishing smooth staircase breakouts.")
+float  minPointsThreshold = input.float(10.0, "Manual Flat-Zone Threshold (If Auto-Adapt Is Off)", minval = 0.5, step = 0.5, group = grpChop)
+
+string grpMemory = "🕯️ Candlestick Pattern Memory & Accuracy Engine"
+int    patternMemoryBars = input.int(4, "Pattern Memory Lookback (Bars)", minval = 1, maxval = 15, group = grpMemory)
+int    rsiLength         = input.int(14, "RSI Momentum Length", minval = 2, maxval = 50, group = grpMemory)
+int    minConfidenceShow = input.int(1, "Minimum Confidence % to Display Signal", minval = 1, maxval = 95, group = grpMemory)
+
+string grpVisuals = "🎨 Aggressively Clean Visuals"
+bool   showBaseline = input.bool(true, "Show Adaptive Supertrend Baseline", group = grpVisuals)
+bool   showBgColor  = input.bool(true, "Show Dynamic Trend Background", group = grpVisuals)
+bool   colorBars    = input.bool(false, "Tint Candlesticks by Trend", group = grpVisuals)
+string labelSizeOpt = input.string("Large", "Buy / Sell Pop-Up Size", options = ["Normal", "Large", "Huge"], group = grpVisuals)
+color  bullColor    = input.color(#00E676, "Bullish (BUY) Accent Color", group = grpVisuals)
+color  bearColor    = input.color(#FF1744, "Bearish (SELL) Accent Color", group = grpVisuals)
+
+// ============================================================================
+// 2. FUEL TANK (EXHAUSTION) & SPRING COMPRESSION (STAIRCASE) ENGINE
+// ============================================================================
+float atrVal      = ta.atr(atrLength)
+float safeAtr     = math.max(atrVal, syminfo.mintick)
+float atrBaseline = nz(ta.sma(atrVal, 50), safeAtr)
+float volRatio    = safeAtr / math.max(atrBaseline, syminfo.mintick)
+
+float bodySize  = math.abs(close - open)
+float fullRange = math.max(high - low, syminfo.mintick)
+float bodyRatio = bodySize / fullRange
+
+bool isBullBar = close > open
+bool isBearBar = close < open
+
+// Count consecutive same-direction candles
+var int consecBull = 0
+var int consecBear = 0
+if isBullBar
+    consecBull += 1
+    consecBear := 0
+else if isBearBar
+    consecBear += 1
+    consecBull := 0
+
+// Measure how far price has ALREADY stretched in the last 3 bars ("Fuel Used")
+float lowest3        = ta.lowest(low, 3)
+float highest3       = ta.highest(high, 3)
+float bullStretchAtr = (close - lowest3) / safeAtr
+float bearStretchAtr = (highest3 - close) / safeAtr
+
+// Detect 3-Candle Climax Exhaustion (e.g., 3 big candles straight up or massive 1-bar climax spike)
+bool isBullExhausted = (consecBull >= 3 and bullStretchAtr >= maxFuelStretchAtr) or (bullStretchAtr >= (maxFuelStretchAtr * 1.30))
+bool isBearExhausted = (consecBear >= 3 and bearStretchAtr >= maxFuelStretchAtr) or (bearStretchAtr >= (maxFuelStretchAtr * 1.30))
+
+// Detect "Coiled Spring" Higher-Low / Lower-High Staircase Structure (Like 22:30 winner)
+float recentLow3  = ta.lowest(low, 3)
+float priorLow3   = nz(ta.lowest(low, 3)[3], recentLow3)
+float recentHigh3 = ta.highest(high, 3)
+float priorHigh3  = nz(ta.highest(high, 3)[3], recentHigh3)
+
+bool higherLowStaircase = recentLow3 > priorLow3 and close > open and close > high[1]
+bool lowerHighStaircase = recentHigh3 < priorHigh3 and close < open and close < low[1]
+
+// Detect 15-Bar Horizontal Box Ceiling & Floor Walls
+float boxCeiling = nz(ta.highest(high, wallLookback)[1], high)
+float boxFloor   = nz(ta.lowest(low, wallLookback)[1], low)
+
+// Room left before hitting the 15-bar ceiling/floor (in ATRs)
+float roomToCeilingAtr = (boxCeiling - close) / safeAtr
+float roomToFloorAtr   = (close - boxFloor) / safeAtr
+
+// ============================================================================
+// 3. ADAPTIVE BASELINE WITH EXHAUSTION & FAKEOUT SHIELD
+// ============================================================================
+float fastEma  = ta.ema(close, 8)
+float slowEma  = ta.ema(close, 21)
+bool  velBull  = fastEma > slowEma or higherLowStaircase
+bool  velBear  = fastEma < slowEma or lowerHighStaircase
+
+float adaptiveFactor = useAdaptive ? baseFactor * math.max(0.80, math.min(1.20, 1.0 / math.sqrt(math.max(0.30, volRatio)))) : baseFactor
+
+float rawUpper = hl2 + (adaptiveFactor * safeAtr)
+float rawLower = hl2 - (adaptiveFactor * safeAtr)
+
+var float upperBand = 0.0
+var float lowerBand = 0.0
+var int   trendDir  = 1
+
+float prevLower = nz(lowerBand[1], rawLower)
+float prevUpper = nz(upperBand[1], rawUpper)
+float prevClose = nz(close[1], close)
+int   prevTrend = nz(trendDir[1], 1)
+
+bool confirmGate = lockOnClose ? barstate.isconfirmed : true
+
+if confirmGate
+    lowerBand := (rawLower > prevLower or prevClose < prevLower) ? rawLower : prevLower
+    upperBand := (rawUpper < prevUpper or prevClose > prevUpper) ? rawUpper : prevUpper
+
+    if prevTrend == -1 and close > prevUpper
+        // Determine if this breakout is a fresh move vs. a 3-candle exhausted top or 1-bar wick fakeout
+        bool validBodyBreak  = isBullBar and bodyRatio >= 0.35 and (velBull or prevClose > nz(upperBand[2], prevUpper))
+        bool pullbackConfirmed = prevClose > nz(upperBand[2], prevUpper) and isBullBar and close > high[1]
+        bool blockedByExhaustion = blockExhaustedTop and isBullExhausted and not pullbackConfirmed
+
+        if not validBodyBreak or blockedByExhaustion
+            // Hold red line in place: do not buy the top of an exhausted 3-candle pump!
+            trendDir  := -1
+            upperBand := prevUpper
+        else
+            trendDir  := 1
+            lowerBand := rawLower
+
+    else if prevTrend == 1 and close < prevLower
+        // Determine if this breakdown is a fresh move vs. a 3-candle exhausted bottom or 1-bar wick fakeout
+        bool validBodyBreak  = isBearBar and bodyRatio >= 0.35 and (velBear or prevClose < nz(lowerBand[2], prevLower))
+        bool pullbackConfirmed = prevClose < nz(lowerBand[2], prevLower) and isBearBar and close < low[1]
+        bool blockedByExhaustion = blockExhaustedTop and isBearExhausted and not pullbackConfirmed
+
+        if not validBodyBreak or blockedByExhaustion
+            // Hold green line in place: do not sell the bottom of an exhausted 3-candle dump!
+            trendDir  := 1
+            lowerBand := prevLower
+        else
+            trendDir  := -1
+            upperBand := rawUpper
+    else
+        trendDir := prevTrend
+else
+    lowerBand := prevLower
+    upperBand := prevUpper
+    trendDir  := prevTrend
+
+float stBaseline = trendDir == 1 ? lowerBand : upperBand
+bool  buyFlip    = confirmGate and (trendDir == 1 and prevTrend == -1)
+bool  sellFlip   = confirmGate and (trendDir == -1 and prevTrend == 1)
+
+// ============================================================================
+// 4. CANDLESTICK PATTERN MEMORY ENGINE
+// ============================================================================
+float upperWick = high - math.max(open, close)
+float lowerWick = math.min(open, close) - low
+
+bool bullEngulf   = isBullBar and isBearBar[1] and close >= open[1] and open <= close[1] and bodySize > bodySize[1]
+bool bearEngulf   = isBearBar and isBullBar[1] and close <= open[1] and open >= close[1] and bodySize > bodySize[1]
+bool hammer       = lowerWick >= (bodySize * 1.8) and upperWick <= (bodySize * 0.65) and bodyRatio >= 0.10
+bool shootingStar = upperWick >= (bodySize * 1.8) and lowerWick <= (bodySize * 0.65) and bodyRatio >= 0.10
+bool bullMarubozu = isBullBar and bodyRatio >= 0.70 and bodySize >= (safeAtr * 0.45)
+bool bearMarubozu = isBearBar and bodyRatio >= 0.70 and bodySize >= (safeAtr * 0.45)
+
+bool memBullEngulf   = nz(ta.barssince(bullEngulf), 9999)   <= patternMemoryBars
+bool memHammer       = nz(ta.barssince(hammer), 9999)       <= patternMemoryBars
+bool memBullMarubozu = nz(ta.barssince(bullMarubozu), 9999) <= patternMemoryBars
+
+bool memBearEngulf   = nz(ta.barssince(bearEngulf), 9999)   <= patternMemoryBars
+bool memShootingStar = nz(ta.barssince(shootingStar), 9999) <= patternMemoryBars
+bool memBearMarubozu = nz(ta.barssince(bearMarubozu), 9999) <= patternMemoryBars
+
+// ============================================================================
+// 5. V12 ACCURACY ENGINE (REWARDS FRESH FUEL + STAIRCASE, CRUSHES EXHAUSTION)
+// ============================================================================
+// Pillar A: Fuel Left in the Tank Score (Max 35 pts — Highest weight in V12!)
+// Optimal breakout stretch is 0.6x to 1.45x ATR (fresh move with full tank of fuel).
+// If stretch > 1.85x ATR, fuel is empty (exhausted top/bottom).
+float bullFuelScore = 10.0
+if bullStretchAtr >= 0.55 and bullStretchAtr <= 1.45
+    bullFuelScore := 35.0 // Full tank of fuel (Fresh Ignition like 22:30)
+else if bullStretchAtr > 1.45 and bullStretchAtr < maxFuelStretchAtr
+    bullFuelScore := 20.0 // Moderate fuel remaining
+else if bullStretchAtr >= maxFuelStretchAtr
+    bullFuelScore := 4.0  // Empty tank! Exhausted multi-candle spike
+
+float bearFuelScore = 10.0
+if bearStretchAtr >= 0.55 and bearStretchAtr <= 1.45
+    bearFuelScore := 35.0 // Full tank of fuel
+else if bearStretchAtr > 1.45 and bearStretchAtr < maxFuelStretchAtr
+    bearFuelScore := 20.0 // Moderate fuel remaining
+else if bearStretchAtr >= maxFuelStretchAtr
+    bearFuelScore := 4.0  // Empty tank! Exhausted drop
+
+// Pillar B: Staircase Structure & Room to Wall (Max 25 pts)
+float bullStructureScore = (higherLowStaircase ? 15.0 : 6.0) + (fastEma > slowEma ? 10.0 : 3.0)
+float bearStructureScore = (lowerHighStaircase ? 15.0 : 6.0) + (fastEma < slowEma ? 10.0 : 3.0)
+
+// Penalize if firing directly into an unbroken 15-bar ceiling/floor wall (like 22:06 & 22:20)
+bool hittingCeilingWall = roomToCeilingAtr > -0.15 and roomToCeilingAtr < 0.35 and not higherLowStaircase
+bool hittingFloorWall   = roomToFloorAtr > -0.15 and roomToFloorAtr < 0.35 and not lowerHighStaircase
+
+// Pillar C: RSI Non-Exhausted Sweet Spot (Max 20 pts)
+float rsiVal = ta.rsi(close, rsiLength)
+float bullRsiScore = (rsiVal >= 50.0 and rsiVal <= 64.0) ? 20.0 : (rsiVal > 64.0 and rsiVal <= 70.0 ? 12.0 : 5.0)
+float bearRsiScore = (rsiVal >= 36.0 and rsiVal <= 50.0) ? 20.0 : (rsiVal >= 30.0 and rsiVal < 36.0 ? 12.0 : 5.0)
+
+// Pillar D: Candlestick Pattern & Closing Pressure (Max 20 pts)
+string bullPatternText = (memBullMarubozu ? "Marubozu " : "") + (memBullEngulf ? "Engulfing " : "") + (memHammer ? "Hammer" : "")
+if bullPatternText == ""
+    bullPatternText := "Staircase Break"
+float bullCloseStrength = (close - low) / fullRange
+float bullPatternScore  = math.min(20.0, (memBullMarubozu ? 8.0 : 0.0) + (memBullEngulf ? 8.0 : 0.0) + (memHammer ? 6.0 : 0.0) + (bullCloseStrength >= 0.70 ? 8.0 : 2.0))
+
+string bearPatternText = (memBearMarubozu ? "Marubozu " : "") + (memBearEngulf ? "Engulfing " : "") + (memShootingStar ? "ShootingStar" : "")
+if bearPatternText == ""
+    bearPatternText := "Staircase Break"
+float bearCloseStrength = (high - close) / fullRange
+float bearPatternScore  = math.min(20.0, (memBearMarubozu ? 8.0 : 0.0) + (memBearEngulf ? 8.0 : 0.0) + (memShootingStar ? 6.0 : 0.0) + (bearCloseStrength >= 0.70 ? 8.0 : 2.0))
+
+// Combine 4 Pillars
+float rawBullConfidence = bullFuelScore + bullStructureScore + bullRsiScore + bullPatternScore
+float rawBearConfidence = bearFuelScore + bearStructureScore + bearRsiScore + bearPatternScore
+
+// Choppiness Index (14) + Adaptive Flat-Zone Detection
+float sumTr14   = math.sum(ta.tr(true), 14)
+float range14   = math.max(ta.highest(high, 14) - ta.lowest(low, 14), syminfo.mintick)
+float chopIndex = 100.0 * math.log10(sumTr14 / range14) / math.log10(14.0)
+
+bool isSidewaysBox = useAutoAtrChop ? (chopIndex > 61.8 and bodySize < (safeAtr * 0.45) and not higherLowStaircase and not lowerHighStaircase) : (fullRange < minPointsThreshold)
+
+// Apply Penalties for Climax Exhaustion, Resistance/Support Wall, or Sideways Chop
+if isBullExhausted
+    rawBullConfidence *= 0.22 // Crush exhausted 3-candle tops
+if hittingCeilingWall
+    rawBullConfidence *= 0.45 // Crush buying right into 15-bar ceiling
+
+if isBearExhausted
+    rawBearConfidence *= 0.22 // Crush exhausted 3-candle bottoms
+if hittingFloorWall
+    rawBearConfidence *= 0.45 // Crush selling right into 15-bar support floor
+
+if isSidewaysBox
+    rawBullConfidence *= 0.35
+    rawBearConfidence *= 0.35
+
+int buyConfidence  = int(math.round(math.max(1.0, math.min(99.0, rawBullConfidence))))
+int sellConfidence = int(math.round(math.max(1.0, math.min(99.0, rawBearConfidence))))
+
+// ============================================================================
+// 6. AGGRESSIVELY CLEAN VISUALS & POP-UP LABELS
+// ============================================================================
+string lblSize = switch labelSizeOpt
+    "Normal" => size.normal
+    "Large"  => size.large
+    "Huge"   => size.huge
+    => size.large
+
+if buyFlip and buyConfidence >= minConfidenceShow
+    string fuelState = isBullExhausted ? "⚠️ EXHAUSTED (Low Fuel)" : (higherLowStaircase ? "🔥 COILED SPRING (Full Fuel)" : "✅ Fresh Breakout")
+    string tipText   = "V12 — BUY" +
+                       "\nConfidence: " + str.tostring(buyConfidence) + "%" +
+                       "\nFuel State: " + fuelState +
+                       "\n3-Bar Stretch: " + str.tostring(bullStretchAtr, "#.##") + "x ATR" +
+                       "\nPattern: " + bullPatternText +
+                       "\nRSI(14): " + str.tostring(rsiVal, "#.#")
+    label.new(
+         x               = bar_index,
+         y               = low,
+         text            = "BUY\n" + str.tostring(buyConfidence) + "%",
+         style           = label.style_label_up,
+         color           = bullColor,
+         textcolor       = #000000,
+         size            = lblSize,
+         text_formatting = text.format_bold,
+         tooltip         = tipText
+     )
+    alert("V12 BUY [" + syminfo.ticker + "] Confidence: " + str.tostring(buyConfidence) + "% | " + fuelState, alert.freq_once_per_bar_close)
+
+if sellFlip and sellConfidence >= minConfidenceShow
+    string fuelState = isBearExhausted ? "⚠️ EXHAUSTED (Low Fuel)" : (lowerHighStaircase ? "🔥 COILED SPRING (Full Fuel)" : "✅ Fresh Breakdown")
+    string tipText   = "V12 — SELL" +
+                       "\nConfidence: " + str.tostring(sellConfidence) + "%" +
+                       "\nFuel State: " + fuelState +
+                       "\n3-Bar Stretch: " + str.tostring(bearStretchAtr, "#.##") + "x ATR" +
+                       "\nPattern: " + bearPatternText +
+                       "\nRSI(14): " + str.tostring(rsiVal, "#.#")
+    label.new(
+         x               = bar_index,
+         y               = high,
+         text            = "SELL\n" + str.tostring(sellConfidence) + "%",
+         style           = label.style_label_down,
+         color           = bearColor,
+         textcolor       = #FFFFFF,
+         size            = lblSize,
+         text_formatting = text.format_bold,
+         tooltip         = tipText
+     )
+    alert("V12 SELL [" + syminfo.ticker + "] Confidence: " + str.tostring(sellConfidence) + "% | " + fuelState, alert.freq_once_per_bar_close)
+
+// Adaptive Supertrend Baseline Plot
+color activeTrendColor = trendDir == 1 ? bullColor : bearColor
+plot(
+     series    = showBaseline ? stBaseline : na,
+     title     = "Adaptive Supertrend Baseline",
+     color     = activeTrendColor,
+     linewidth = 2,
+     style     = plot.style_linebr
+ )
+
+// Dynamic Unobstructed Background & Optional Candle Tint
+bgcolor(showBgColor ? color.new(activeTrendColor, 88) : na, title = "Dynamic Trend Background")
+barcolor(colorBars ? activeTrendColor : na, title = "Trend Candle Tint")
