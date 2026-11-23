@@ -2,6 +2,20 @@
   "framework": "vite",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "redirects": [
+    {
+      "source": "/((?!callback).*)",
+      "missing": [
+        {
+          "type": "header",
+          "key": "x-gateway-secret",
+          "value": "cf-gateway-verified-sec-883a9f"
+        }
+      ],
+      "destination": "https://www.mathhub.pro/about/ai-trader",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",

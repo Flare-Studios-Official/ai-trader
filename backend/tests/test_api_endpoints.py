@@ -86,3 +86,22 @@ def test_angel_one_oauth_callback():
     assert res_with_tokens.status_code == 200
     assert "Session authorization tokens were received" in res_with_tokens.text
 
+
+def test_gateway_secret_authorization_barrier():
+    # Direct external caller without gateway secret should be rejected
+    external_client = TestClient(app, client=("198.51.100.25", 54321))
+    blocked_res = external_client.get("/api/overview")
+    assert blocked_res.status_code == 401
+    assert "Direct backend access blocked" in blocked_res.json()["error"]
+
+    # External caller with valid gateway secret should be accepted
+    authorized_res = external_client.get("/api/overview", headers={"x-gateway-secret": "cf-gateway-verified-sec-883a9f"})
+    assert authorized_res.status_code == 200
+
+    # Public health check and OAuth callback must remain reachable without secret
+    health_res = external_client.get("/api/health")
+    assert health_res.status_code == 200
+    cb_res = external_client.get("/api/auth/angelone/callback")
+    assert cb_res.status_code == 200
+
+

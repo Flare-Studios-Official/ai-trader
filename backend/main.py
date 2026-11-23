@@ -57,6 +57,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "cf-gateway-verified-sec-883a9f")
+
+
+@app.middleware("http")
+async def verify_gateway_or_local(request, call_next):
+    """
+    Security Barrier: Blocks direct unauthorized access to backend API routes.
+    Only requests bearing the verified x-gateway-secret header from Cloudflare Edge
+    (or local/test environments) are permitted.
+    """
+    path = request.url.path
+    client_host = request.client.host if request.client else "unknown"
+
+    if (
+        path in ["/", "/api/health", "/docs", "/openapi.json"]
+        or path.startswith("/api/auth/angelone/callback")
+        or client_host in ("127.0.0.1", "localhost", "testclient")
+        or os.getenv("ENV") == "test"
+    ):
+        return await call_next(request)
+
+    secret_header = request.headers.get("x-gateway-secret")
+    if secret_header != GATEWAY_SECRET:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Direct backend access blocked. Gateway verification required."}
+        )
+    return await call_next(request)
+
 
 @app.get("/")
 def root():

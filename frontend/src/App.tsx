@@ -96,6 +96,40 @@ const INITIAL_STATE: DashboardState = {
 };
 
 export const App: React.FC = () => {
+  // Security guard against direct Vercel domain bypass
+  const isDirectVercelAccess = 
+    typeof window !== 'undefined' &&
+    window.location.hostname.endsWith('vercel.app') && 
+    !window.location.pathname.startsWith('/callback');
+
+  useEffect(() => {
+    if (isDirectVercelAccess) {
+      window.location.replace('https://www.mathhub.pro/about/ai-trader');
+    }
+  }, [isDirectVercelAccess]);
+
+  if (isDirectVercelAccess) {
+    return (
+      <div className="min-h-screen bg-[#080B10] flex items-center justify-center p-4">
+        <div className="bg-[#111722] border border-[#1E293B] rounded-2xl p-8 max-w-md text-center shadow-2xl">
+          <div className="inline-block px-3 py-1 bg-red-500/20 text-red-400 font-bold text-xs rounded-full mb-4">
+            Direct Access Blocked
+          </div>
+          <h2 className="text-xl font-bold text-white mb-2">Redirecting to Secure Gateway</h2>
+          <p className="text-gray-400 text-sm mb-6">
+            Direct access to this deployment is restricted. You are being redirected to the authenticated MathHub gateway.
+          </p>
+          <a
+            href="https://www.mathhub.pro/about/ai-trader"
+            className="inline-block bg-blue-600 hover:bg-blue-700 text-white font-semibold text-sm px-5 py-2.5 rounded-lg"
+          >
+            Go to MathHub AI Trader
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   const [state, setState] = useState<DashboardState>(INITIAL_STATE);
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [selectedSignal, setSelectedSignal] = useState<SignalItem | null>(null);
