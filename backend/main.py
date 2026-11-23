@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
-from app.core.database import init_db, SessionLocal, SignalLog, TradeRecord
+from app.core.database import init_db, SessionLocal, SignalLog, TradeRecord, SystemSetting
 from app.core.orchestrator import orchestrator
 from app.core.automated_trader import automated_trader
 from app.broker.instruments import ContractResolver, INDEX_SPECS, BlackScholesPricer, InstrumentType
@@ -86,7 +86,7 @@ async def angel_one_oauth_callback(
     """
     has_tokens = bool(auth_token or feed_token)
     
-    # If the active provider is Angel One, store the received session tokens
+    # If the active provider is Angel One, store the received session tokens in memory
     from app.market_data.angel_one_provider import AngelOneMarketDataProvider
     if isinstance(orchestrator.provider, AngelOneMarketDataProvider):
         if auth_token:
@@ -96,6 +96,28 @@ async def angel_one_oauth_callback(
             orchestrator.provider.client.feed_token = feed_token
         if refreshToken:
             orchestrator.provider.client.refresh_token = refreshToken
+
+    # Persist session tokens to PostgreSQL / SQLite database (survives worker restarts)
+    if has_tokens:
+        db = SessionLocal()
+        try:
+            import json
+            token_payload = json.dumps({
+                "jwt_token": auth_token,
+                "feed_token": feed_token,
+                "refresh_token": refreshToken,
+                "updated_at": datetime.utcnow().isoformat()
+            })
+            setting = db.query(SystemSetting).filter(SystemSetting.key == "angel_one_session").first()
+            if setting:
+                setting.value = token_payload
+            else:
+                db.add(SystemSetting(key="angel_one_session", value=token_payload, description="Angel One SmartAPI OAuth Tokens"))
+            db.commit()
+        except Exception as e:
+            print(f"Error persisting Angel One tokens: {e}")
+        finally:
+            db.close()
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">

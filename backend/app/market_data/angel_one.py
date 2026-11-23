@@ -45,6 +45,27 @@ class AngelOneClient:
         self.refresh_token: Optional[str] = None
         self.feed_token: Optional[str] = None
         self.is_authenticated: bool = False
+        self._load_persisted_session()
+
+    def _load_persisted_session(self):
+        try:
+            from app.core.database import SessionLocal, SystemSetting
+            import json
+            db = SessionLocal()
+            try:
+                setting = db.query(SystemSetting).filter(SystemSetting.key == "angel_one_session").first()
+                if setting and setting.value:
+                    data = json.loads(setting.value)
+                    self.jwt_token = data.get("jwt_token")
+                    self.refresh_token = data.get("refresh_token")
+                    self.feed_token = data.get("feed_token")
+                    if self.jwt_token:
+                        self.is_authenticated = True
+                        logger.info("Loaded persisted Angel One session tokens from database.")
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"Could not load persisted Angel One session: {e}")
 
     def is_configured(self) -> bool:
         c = self.credentials

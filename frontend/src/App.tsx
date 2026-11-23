@@ -100,9 +100,25 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [selectedSignal, setSelectedSignal] = useState<SignalItem | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [authBanner, setAuthBanner] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const apiBase = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+
+  useEffect(() => {
+    // Check if redirected from Angel One SmartAPI
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const authToken = params.get('auth_token');
+      const feedToken = params.get('feed_token');
+      if (authToken || feedToken) {
+        setAuthBanner('Angel One SmartAPI Authorization Successful — Tokens captured.');
+        fetch(`${apiBase}/api/auth/angelone/callback?auth_token=${encodeURIComponent(authToken || '')}&feed_token=${encodeURIComponent(feedToken || '')}`).catch(() => {});
+      }
+    } catch (e) {
+      console.warn('Error reading redirect query params:', e);
+    }
+  }, []);
 
   const fetchOverview = async () => {
     try {
@@ -245,6 +261,13 @@ export const App: React.FC = () => {
         onToggleAutomatedTrading={handleToggleAutomatedTrading}
         isConnected={isConnected}
       />
+
+      {authBanner && (
+        <div className="bg-emerald-500/20 border-b border-emerald-500/40 text-emerald-400 px-4 py-2.5 text-xs sm:text-sm font-semibold flex items-center justify-between max-w-7xl mx-auto w-full">
+          <span>✓ {authBanner}</span>
+          <button onClick={() => setAuthBanner(null)} className="text-gray-400 hover:text-white ml-4">✕</button>
+        </div>
+      )}
 
       <Navigation
         activeTab={activeTab}
