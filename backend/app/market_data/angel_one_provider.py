@@ -45,13 +45,13 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
     def is_connected(self) -> bool:
         return self.client.is_authenticated
 
-    @property
+        @property
     def status_message(self) -> str:
         if not self.client.is_configured():
-            return "STANDBY — Angel One credentials not configured. Using Demo Provider."
+            return "ERROR — Angel One credentials not configured."
         if not self.client.is_authenticated:
-            return "DISCONNECTED — Credentials present but session not established."
-        return "CONNECTED — Authorised Angel One SmartAPI Feed Active"
+            return "DISCONNECTED — Angel One session not authenticated."
+        return "CONNECTED — Angel One authentication established."
 
     def get_supported_instruments(self) -> List[InstrumentMetadata]:
         # Angel One supports Indian equities, indices, and derivatives; BTC/USDT spot is also tracked 24/7
@@ -73,49 +73,79 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
         "BANKEX": ("BSE", "12", 15.0),
     }
 
-    async def get_candles(self, symbol: str, timeframe: str = "5m", bars: int = 150) -> pd.DataFrame:
-        sym = symbol.upper()
-        if sym in self.SYMBOL_MAP:
-            exchange, token, _ = self.SYMBOL_MAP[sym]
-            try:
-                df = await self.client.get_historical_candles(exchange, token, interval="FIVE_MINUTE")
-                if df is not None and not df.empty:
-                    df["data_mode"] = DataMode.LIVE_AUTHORISED_DATA.value
-                    return df
-            except Exception as e:
-                logger.warning(f"Angel One candle fetch failed for {symbol}: {e}. Falling back to demo data.")
+        async def get_candles(
+        self,
+        symbol: str,
+        timeframe: str = "5m",
+        bars: int = 150
+    ) -> pd.DataFrame:
 
-        # Graceful fallback to demo provider for BTC/USDT or when feed is outside hours
-        from app.market_data.demo_provider import DemoMarketDataProvider
-        demo = DemoMarketDataProvider()
-        return await demo.get_candles(symbol, timeframe, bars)
-
-    async def get_quote(self, symbol: str) -> MarketQuote:
         sym = symbol.upper()
-        if sym in self.SYMBOL_MAP:
-            exchange, token, _ = self.SYMBOL_MAP[sym]
-            try:
-                full_quote = await self.client.get_full_quote(exchange, token)
-                if full_quote:
-                    ltp = float(full_quote.get("ltp", 0.0))
-                    net_change = float(full_quote.get("netChange", 0.0))
-                    pct_change = float(full_quote.get("percentChange", 0.0))
-                    high = float(full_quote.get("high", 0.0))
-                    low = float(full_quote.get("low", 0.0))
-                    volume = float(full_quote.get("tradeVolume", 0.0))
-                    return MarketQuote(
-                        symbol=sym,
-                        price=ltp,
-                        change_24h=net_change,
-                        change_pct_24h=pct_change,
-                        high_24h=high,
-                        low_24h=low,
-                        volume_24h=volume,
-                        timestamp=datetime.now().isoformat(),
-                        data_mode=DataMode.LIVE_AUTHORISED_DATA,
-                        source_label="Angel One SmartAPI Authorised Feed",
-                        asset_type=AssetType.INDEX_F_AND_O
-                    )
+
+        if sym not in self.SYMBOL_MAP:
+            raise ValueError(
+                f"{sym} is not supported by the Angel One live feed."
+            )
+
+        exchange, token, _ = self.SYMBOL_MAP[sym]
+
+        df = await self.client.get_historical_candles(
+            exchange,
+            token,
+            interval="FIVE_MINUTE"
+        )
+
+        if df is None or df.empty:
+            raise RuntimeError(
+                f"Angel One returned no live candle data for {sym}."
+            )
+
+        df = df.tail(bars).copy()
+        df["data_mode"] = DataMode.LIVE_AUTHORISED_DATA.value
+
+        return df
+
+        async def get_quote(self, symbol: str) -> MarketQuote:
+
+        sym = symbol.upper()
+
+        if sym not in self.SYMBOL_MAP:
+            raise ValueError(
+                f"{sym} is not supported by the Angel One live feed."
+            )
+
+        exchange, token, _ = self.SYMBOL_MAP[sym]
+
+        full_quote = await self.client.get_full_quote(
+            exchange,
+            token
+        )
+
+        if not full_quote:
+            raise RuntimeError(
+                f"Angel One live quote unavailable for {sym}."
+            )
+
+        ltp = float(full_quote.get("ltp", 0.0))
+
+        if ltp <= 0:
+            raise RuntimeError(
+                f"Angel One returned an invalid price for {sym}."
+            )
+
+        return MarketQuote(
+            symbol=sym,
+            price=ltp,
+            change_24h=float(full_quote.get("netChange", 0.0)),
+            change_pct_24h=float(full_quote.get("percentChange", 0.0)),
+            high_24h=float(full_quote.get("high", 0.0)),
+            low_24h=float(full_quote.get("low", 0.0)),
+            volume_24h=float(full_quote.get("tradeVolume", 0.0)),
+            timestamp=datetime.now().isoformat(),
+            data_mode=DataMode.LIVE_AUTHORISED_DATA,
+            source_label="Angel One SmartAPI",
+            asset_type=AssetType.INDEX_F_AND_O
+        )
             except Exception as e:
                 logger.warning(f"Angel One quote fetch failed for {symbol}: {e}. Falling back to demo quote.")
 

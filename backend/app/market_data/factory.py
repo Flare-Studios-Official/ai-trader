@@ -14,16 +14,34 @@ _active_provider: Optional[BaseMarketDataProvider] = None
 
 def get_market_data_provider() -> BaseMarketDataProvider:
     global _active_provider
+
     if _active_provider is None:
         provider_type = os.getenv("MARKET_DATA_PROVIDER", "").lower()
-        angel_configured = bool(
-            os.getenv("ANGEL_API_KEY")
-            and os.getenv("ANGEL_CLIENT_CODE")
-            and os.getenv("ANGEL_PIN")
-            and os.getenv("ANGEL_TOTP_SECRET")
-        )
-        if provider_type == "angel_one" and angel_configured:
+
+        if provider_type == "angel_one":
+            required = [
+                "ANGEL_API_KEY",
+                "ANGEL_CLIENT_CODE",
+                "ANGEL_PIN",
+                "ANGEL_TOTP_SECRET",
+            ]
+            missing = [key for key in required if not os.getenv(key)]
+
+            if missing:
+                raise RuntimeError(
+                    "Angel One live data configuration incomplete. "
+                    f"Missing environment variables: {', '.join(missing)}"
+                )
+
             _active_provider = AngelOneMarketDataProvider()
-        else:
+
+        elif provider_type == "demo":
             _active_provider = DemoMarketDataProvider()
+
+        else:
+            raise RuntimeError(
+                "Invalid MARKET_DATA_PROVIDER. "
+                "Use angel_one or explicitly enabled demo mode."
+            )
+
     return _active_provider
