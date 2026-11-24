@@ -102,9 +102,9 @@ export const Header: React.FC<HeaderProps> = ({
             }`}>
               {isAutoTradeOn
                 ? selectedInstrument === 'ALL'
-                  ? '● ACTIVE — Autonomous Trading Across ALL Markets (Zero Approval Needed)'
-                  : `● ACTIVE — Autonomous Trading in ${selectedInstrument} (Zero Approval Needed)`
-                : '○ INACTIVE — Standby Mode'}
+                  ? '● AUTO SCANNING: Waiting for fresh V12 signal across ALL markets (Zero premature trades • AI Verifier Active)'
+                  : `● AUTO SCANNING: Waiting for fresh V12 signal on ${selectedInstrument} (Zero premature trades • AI Verifier Active)`
+                : '○ AUTO TRADE: OFF (Click button to enable autonomous scanning)'}
             </span>
           </div>
 

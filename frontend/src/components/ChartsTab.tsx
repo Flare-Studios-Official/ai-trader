@@ -61,15 +61,15 @@ export const ChartsTab: React.FC<ChartsTabProps> = ({
           </div>
           <div>
             <div className="flex items-center space-x-2">
-              <h2 className="text-base font-bold text-white">Autonomous Indicator-Based Execution</h2>
+              <h2 className="text-base font-bold text-white">V12 Indicator & Stage 2 AI Verifier</h2>
               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                isAutoTradeActive ? 'bg-emerald-500 text-white' : 'bg-gray-700 text-gray-300'
+                isAutoTradeActive ? 'bg-emerald-500 text-white animate-pulse' : 'bg-gray-700 text-gray-300'
               }`}>
-                {isAutoTradeActive ? 'AUTONOMOUS ACTIVE' : 'AUTO TRADE OFF'}
+                {isAutoTradeActive ? 'SCANNING FOR NEW V12 SIGNALS' : 'AUTO TRADE OFF'}
               </span>
             </div>
             <p className="text-xs text-brand-muted mt-0.5">
-              TradingView Lightweight Chart &bull; Evaluates RSI, EMA 9/21 cross, &amp; Trend every 1s &bull; Strictly 100% Paper Trading
+              Zero premature trades &bull; Waits for fresh V12 crossover event &bull; AI Candlestick &amp; Market Verification before order placement
             </p>
           </div>
         </div>
