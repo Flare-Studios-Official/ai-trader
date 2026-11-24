@@ -13,6 +13,7 @@ import {
   CheckCircle2
 } from 'lucide-react';
 import { MarketWatchItem, OpenPosition } from '../types';
+import { TradingViewChart } from './TradingViewChart';
 
 interface BitcoinPanelProps {
   btcItem?: MarketWatchItem;
@@ -119,6 +120,17 @@ export const BitcoinPanel: React.FC<BitcoinPanelProps> = ({
             </div>
           </div>
         )}
+
+        {/* Embedded Live TradingView Chart */}
+        <div className="mt-5">
+          <TradingViewChart
+            symbol="BTC/USDT"
+            currentPrice={btcItem?.price || 60350}
+            changePct={btcItem?.change_pct || -2.03}
+            height={440}
+            showControls={true}
+          />
+        </div>
 
         {/* Interactive Simulation Controls */}
         <div className="mt-5 pt-4 border-t border-brand-border/60 flex items-center justify-between flex-wrap gap-2">

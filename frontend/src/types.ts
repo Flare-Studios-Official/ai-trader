@@ -135,6 +135,21 @@ export interface OptionsChainResponse {
   data_mode?: string;
 }
 
+export interface AutoTradeLog {
+  id: string;
+  timestamp: string;
+  symbol: string;
+  action: 'BUY' | 'SELL' | 'CLOSE';
+  details: string;
+  confidence: number;
+  indicators: {
+    rsi: number;
+    ema_signal: string;
+    trend: string;
+  };
+  pnl?: number;
+}
+
 export interface DashboardState {
   portfolio: PortfolioSummary;
   open_positions: OpenPosition[];
@@ -142,4 +157,5 @@ export interface DashboardState {
   recent_signals: SignalItem[];
   market_watch: MarketWatchItem[];
   system_status: SystemStatus;
+  auto_trade_logs?: AutoTradeLog[];
 }

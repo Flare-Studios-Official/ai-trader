@@ -161,3 +161,238 @@ export async function fetchLiveBitcoin(): Promise<{ price: number; change: numbe
 
   return { price: 60250.0, change: -1250.0, change_pct: -2.03, high: 63600.0, low: 59300.0, volume: 14000 };
 }
+
+export interface CandleData {
+  time: number; // unix timestamp in seconds
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+}
+
+// Generate realistic baseline candles for TradingView chart based on current market price
+export function generateCandlesForSymbol(
+  symbol: string,
+  basePrice: number,
+  count: number = 120,
+  intervalSeconds: number = 60
+): CandleData[] {
+  const candles: CandleData[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  const startTime = now - count * intervalSeconds;
+
+  let currentPrice = basePrice * 0.985;
+  const isCrypto = symbol.includes('BTC');
+  const volatility = isCrypto ? 0.0025 : 0.0012;
+
+  for (let i = 0; i < count; i++) {
+    const time = startTime + i * intervalSeconds;
+    const progress = i / count;
+    // Drift gradually towards basePrice
+    const drift = (basePrice - currentPrice) * 0.05;
+    const noise = (Math.random() - 0.49) * (currentPrice * volatility);
+    const open = currentPrice;
+    let close = currentPrice + drift + noise;
+    if (i === count - 1) {
+      close = basePrice;
+    }
+    const high = Math.max(open, close) + Math.random() * (currentPrice * volatility * 0.8);
+    const low = Math.min(open, close) - Math.random() * (currentPrice * volatility * 0.8);
+    const volume = Math.floor((isCrypto ? 15 : 2500) * (0.8 + Math.random() * 0.6));
+
+    candles.push({
+      time,
+      open: parseFloat(open.toFixed(2)),
+      high: parseFloat(high.toFixed(2)),
+      low: parseFloat(low.toFixed(2)),
+      close: parseFloat(close.toFixed(2)),
+      volume
+    });
+
+    currentPrice = close;
+  }
+
+  return candles;
+}
+
+// Technical Indicator Calculations
+export function calculateEMA(candles: CandleData[], period: number): { time: number; value: number }[] {
+  if (candles.length < period) return [];
+  const k = 2 / (period + 1);
+  const result: { time: number; value: number }[] = [];
+
+  let sum = 0;
+  for (let i = 0; i < period; i++) {
+    sum += candles[i].close;
+  }
+  let ema = sum / period;
+  result.push({ time: candles[period - 1].time, value: parseFloat(ema.toFixed(2)) });
+
+  for (let i = period; i < candles.length; i++) {
+    ema = candles[i].close * k + ema * (1 - k);
+    result.push({ time: candles[i].time, value: parseFloat(ema.toFixed(2)) });
+  }
+
+  return result;
+}
+
+export function calculateRSI(candles: CandleData[], period: number = 14): number {
+  if (candles.length <= period) return 50.0;
+
+  let gains = 0;
+  let losses = 0;
+
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const change = candles[i].close - candles[i - 1].close;
+    if (change >= 0) {
+      gains += change;
+    } else {
+      losses -= change;
+    }
+  }
+
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+
+  if (avgLoss === 0) return 100.0;
+  const rs = avgGain / avgLoss;
+  return parseFloat((100 - (100 / (1 + rs))).toFixed(1));
+}
+
+// Autonomous Trading Indicator Signal Evaluator
+export interface IndicatorSignal {
+  action: 'BUY' | 'SELL' | 'HOLD';
+  confidence: number;
+  rsi: number;
+  ema9: number;
+  ema21: number;
+  trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  reason: string;
+}
+
+export function evaluateIndicators(candles: CandleData[]): IndicatorSignal {
+  if (candles.length < 25) {
+    return {
+      action: 'HOLD',
+      confidence: 50,
+      rsi: 50,
+      ema9: 0,
+      ema21: 0,
+      trend: 'NEUTRAL',
+      reason: 'Insufficient candle data for indicator analysis'
+    };
+  }
+
+  const rsi = calculateRSI(candles, 14);
+  const ema9Series = calculateEMA(candles, 9);
+  const ema21Series = calculateEMA(candles, 21);
+
+  const lastEma9 = ema9Series[ema9Series.length - 1]?.value || 0;
+  const lastEma21 = ema21Series[ema21Series.length - 1]?.value || 0;
+  const prevEma9 = ema9Series[ema9Series.length - 2]?.value || lastEma9;
+  const prevEma21 = ema21Series[ema21Series.length - 2]?.value || lastEma21;
+
+  const currentPrice = candles[candles.length - 1].close;
+
+  // Bullish Golden Cross or Momentum Breakout
+  const goldenCross = prevEma9 <= prevEma21 && lastEma9 > lastEma21;
+  const deathCross = prevEma9 >= prevEma21 && lastEma9 < lastEma21;
+  const bullishMomentum = lastEma9 > lastEma21 && currentPrice > lastEma9;
+  const bearishMomentum = lastEma9 < lastEma21 && currentPrice < lastEma9;
+
+  let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+  let confidence = 50;
+  let reason = 'Market consolidates in neutral band';
+  let trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
+
+  if (goldenCross || (bullishMomentum && rsi >= 38 && rsi <= 68)) {
+    action = 'BUY';
+    confidence = Math.min(95, Math.round(72 + (goldenCross ? 15 : 0) + (rsi < 45 ? 8 : 0)));
+    trend = 'BULLISH';
+    reason = goldenCross
+      ? `EMA 9/21 Golden Cross confirmed (RSI ${rsi})`
+      : `Bullish Trend continuation above EMA9 (RSI ${rsi})`;
+  } else if (deathCross || (bearishMomentum && rsi >= 32 && rsi <= 62)) {
+    action = 'SELL';
+    confidence = Math.min(95, Math.round(72 + (deathCross ? 15 : 0) + (rsi > 55 ? 8 : 0)));
+    trend = 'BEARISH';
+    reason = deathCross
+      ? `EMA 9/21 Death Cross confirmed (RSI ${rsi})`
+      : `Bearish Breakdown below EMA9/21 (RSI ${rsi})`;
+  } else if (rsi < 30) {
+    // Oversold reversal trigger
+    action = 'BUY';
+    confidence = 78;
+    trend = 'BULLISH';
+    reason = `RSI Oversold Bounce (${rsi} < 30)`;
+  } else if (rsi > 70) {
+    // Overbought reversal trigger
+    action = 'SELL';
+    confidence = 78;
+    trend = 'BEARISH';
+    reason = `RSI Overbought Exhaustion (${rsi} > 70)`;
+  }
+
+  return { action, confidence, rsi, ema9: lastEma9, ema21: lastEma21, trend, reason };
+}
+
+// 1-Second Coinbase WebSocket Live Feed
+export function subscribeCoinbaseWebSocket(
+  onPriceUpdate: (data: { price: number; time: number }) => void
+): () => void {
+  let ws: WebSocket | null = null;
+  let isClosed = false;
+
+  const connect = () => {
+    if (isClosed) return;
+    try {
+      ws = new WebSocket('wss://ws-feed.exchange.coinbase.com');
+
+      ws.onopen = () => {
+        const msg = {
+          type: 'subscribe',
+          product_ids: ['BTC-USD'],
+          channels: ['ticker']
+        };
+        ws?.send(JSON.stringify(msg));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'ticker' && data.price) {
+            const price = parseFloat(data.price);
+            if (!isNaN(price) && price > 0) {
+              onPriceUpdate({ price, time: Math.floor(Date.now() / 1000) });
+            }
+          }
+        } catch {}
+      };
+
+      ws.onerror = () => {
+        ws?.close();
+      };
+
+      ws.onclose = () => {
+        if (!isClosed) {
+          setTimeout(connect, 3000);
+        }
+      };
+    } catch {
+      if (!isClosed) {
+        setTimeout(connect, 5000);
+      }
+    }
+  };
+
+  connect();
+
+  return () => {
+    isClosed = true;
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+  };
+}

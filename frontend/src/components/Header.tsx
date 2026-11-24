@@ -36,6 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   const selectedInstrument = systemStatus.selected_instrument || 'NIFTY';
 
   const instruments = [
+    { id: 'ALL', label: 'ALL MARKETS (Autonomous)', icon: '⚡' },
     { id: 'NIFTY', label: 'NIFTY 50 (Options)', icon: '📈' },
     { id: 'BANKNIFTY', label: 'BANK NIFTY (Options)', icon: '🏦' },
     { id: 'SENSEX', label: 'SENSEX (Options)', icon: '🏛️' },
@@ -93,7 +94,9 @@ export const Header: React.FC<HeaderProps> = ({
                 : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
             }`}>
               {isAutoTradeOn
-                ? `● ACTIVE — Trading ${selectedInstrument} Only`
+                ? selectedInstrument === 'ALL'
+                  ? '● ACTIVE — Autonomous Trading Across ALL Markets (Zero Approval Needed)'
+                  : `● ACTIVE — Autonomous Trading in ${selectedInstrument} (Zero Approval Needed)`
                 : '○ INACTIVE — Standby Mode'}
             </span>
           </div>

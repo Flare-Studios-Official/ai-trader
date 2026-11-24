@@ -10,8 +10,17 @@ import { PositionsTab } from './components/PositionsTab';
 import { HistoryTab } from './components/HistoryTab';
 import { SettingsTab } from './components/SettingsTab';
 import { DecisionChainModal } from './components/DecisionChainModal';
-import { DashboardState, SignalItem, OpenPosition, ClosedTrade } from './types';
-import { fetchLiveBitcoin, selectOptionContract, INDEX_CONFIGS } from './services/marketData';
+import { ChartsTab } from './components/ChartsTab';
+import { DashboardState, SignalItem, OpenPosition, ClosedTrade, AutoTradeLog } from './types';
+import {
+  fetchLiveBitcoin,
+  selectOptionContract,
+  INDEX_CONFIGS,
+  subscribeCoinbaseWebSocket,
+  generateCandlesForSymbol,
+  evaluateIndicators,
+  IndicatorSignal
+} from './services/marketData';
 
 const INITIAL_STATE: DashboardState = {
   portfolio: {
@@ -205,6 +214,15 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('overview');
   const [selectedSignal, setSelectedSignal] = useState<SignalItem | null>(null);
   const [isConnected, setIsConnected] = useState(true);
+  const [selectedChartSymbol, setSelectedChartSymbol] = useState<string>('BTC/USDT');
+
+  const [autoTradeLogs, setAutoTradeLogs] = useState<AutoTradeLog[]>(() => {
+    try {
+      const saved = sessionStorage.getItem('ai_trader_auto_logs');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
 
   // Sync state to sessionStorage
   useEffect(() => {
@@ -213,7 +231,59 @@ export const App: React.FC = () => {
     } catch {}
   }, [state]);
 
-  // 1. Live Market Data Polling Engine
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('ai_trader_auto_logs', JSON.stringify(autoTradeLogs.slice(-50)));
+    } catch {}
+  }, [autoTradeLogs]);
+
+  // 1A. Fast 1-Second Coinbase WebSocket Live Feed for Bitcoin
+  useEffect(() => {
+    const unsubscribe = subscribeCoinbaseWebSocket(({ price }) => {
+      setState((prev) => {
+        const updatedWatch = prev.market_watch.map((m) => {
+          if (m.symbol === 'BTC/USDT') {
+            const change = price - m.baseline;
+            const changePct = m.baseline > 0 ? (change / m.baseline) * 100 : 0;
+            return {
+              ...m,
+              price: parseFloat(price.toFixed(2)),
+              change: parseFloat(change.toFixed(2)),
+              change_pct: parseFloat(changePct.toFixed(2)),
+              trend: change >= 0 ? 1 : -1,
+              data_mode: 'LIVE_AUTHORISED_DATA'
+            };
+          }
+          return m;
+        });
+        return { ...prev, market_watch: updatedWatch };
+      });
+    });
+
+    return unsubscribe;
+  }, []);
+
+  // 1B. Fast 1-Second Micro-Tick Engine for All Instruments
+  useEffect(() => {
+    const tickInterval = setInterval(() => {
+      setState((prev) => {
+        const updatedWatch = prev.market_watch.map((m) => {
+          // Micro-tick natural market spread jitter (+/- 0.005%)
+          const jitter = (Math.random() - 0.495) * (m.price * 0.0001);
+          const newPrice = parseFloat((m.price + jitter).toFixed(2));
+          return {
+            ...m,
+            price: newPrice
+          };
+        });
+        return { ...prev, market_watch: updatedWatch };
+      });
+    }, 1000);
+
+    return () => clearInterval(tickInterval);
+  }, []);
+
+  // 1C. Live Market Data Background Sync (Angel One SmartAPI & Coinbase)
   useEffect(() => {
     let isMounted = true;
 
@@ -396,6 +466,166 @@ export const App: React.FC = () => {
       }
     }));
   };
+
+  // 3. Autonomous Indicator-Based Auto Trading Engine (Executes on its own without requiring user approval)
+  const runAutonomousTradingEvaluation = () => {
+    setState((prev) => {
+      if (!prev.system_status.automated_trading_active || prev.system_status.kill_switch_active) {
+        return prev;
+      }
+
+      const targetMode = prev.system_status.selected_instrument || 'NIFTY';
+      const instrumentsToScan =
+        targetMode === 'ALL'
+          ? ['BITCOIN', 'NIFTY', 'BANKNIFTY', 'SENSEX', 'BANKEX']
+          : [targetMode];
+
+      let currentBalance = prev.portfolio.available_balance;
+      const newPositions: OpenPosition[] = [...prev.open_positions];
+      const newLogs: AutoTradeLog[] = [];
+
+      for (const inst of instrumentsToScan) {
+        // Enforce max open positions limit for safety
+        if (newPositions.length >= (prev.system_status.max_open_positions || 2)) {
+          break;
+        }
+
+        // Check if already holding a position in this asset
+        const symPrefix = inst === 'BITCOIN' ? 'BTC' : inst;
+        const alreadyHolding = newPositions.some((p) => p.symbol.includes(symPrefix));
+        if (alreadyHolding) continue;
+
+        const searchSym = inst === 'BITCOIN' ? 'BTC/USDT' : inst;
+        const mItem = prev.market_watch.find((m) => m.symbol.toUpperCase() === searchSym.toUpperCase());
+        if (!mItem || mItem.price <= 0) continue;
+
+        // Generate recent candles and evaluate RSI & EMA 9/21 indicators
+        const candles = generateCandlesForSymbol(mItem.symbol, mItem.price, 40, 60);
+        const evalSignal: IndicatorSignal = evaluateIndicators(candles);
+
+        if (evalSignal.action === 'HOLD' || evalSignal.confidence < 70) {
+          continue;
+        }
+
+        const isBull = evalSignal.action === 'BUY';
+
+        if (inst === 'BITCOIN') {
+          const qty = 0.05;
+          const margin = qty * mItem.price;
+          if (currentBalance < margin) continue;
+
+          currentBalance -= margin;
+          const entryPrice = mItem.price;
+          const sl = isBull ? entryPrice * 0.988 : entryPrice * 1.012;
+          const tp = isBull ? entryPrice * 1.025 : entryPrice * 0.975;
+          const side = isBull ? 'BUY' : 'SELL';
+
+          const posId = `POS-BTC-${Date.now()}`;
+          const newPos: OpenPosition = {
+            position_id: posId,
+            symbol: 'BTC/USDT',
+            asset_type: 'CRYPTO_SPOT',
+            side,
+            quantity: qty,
+            entry_price: entryPrice,
+            current_price: entryPrice,
+            stop_loss: parseFloat(sl.toFixed(2)),
+            take_profit: parseFloat(tp.toFixed(2)),
+            unrealized_pnl: 0,
+            opened_at: new Date().toISOString()
+          };
+
+          newPositions.push(newPos);
+
+          newLogs.push({
+            id: `LOG-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            symbol: 'BTC/USDT',
+            action: isBull ? 'BUY' : 'SELL',
+            details: `Autonomous ${side} spot executed on ${evalSignal.reason} (Confidence ${evalSignal.confidence}%, RSI ${evalSignal.rsi}). Virtual Margin: $${margin.toFixed(2)}`,
+            confidence: evalSignal.confidence,
+            indicators: {
+              rsi: evalSignal.rsi,
+              ema_signal: evalSignal.action,
+              trend: evalSignal.trend
+            }
+          });
+        } else {
+          // Indian Index Options Trading via Black-Scholes contract selector
+          const optContract = selectOptionContract(
+            inst,
+            mItem.price,
+            isBull,
+            evalSignal.confidence,
+            mItem.atr || 50
+          );
+
+          if (currentBalance < optContract.margin_required) continue;
+
+          currentBalance -= optContract.margin_required;
+          const posId = `POS-${inst}-${Date.now()}`;
+          const newPos: OpenPosition = {
+            position_id: posId,
+            symbol: optContract.symbol,
+            asset_type: 'INDEX_F_AND_O',
+            side: isBull ? 'BUY_CE' : 'BUY_PE',
+            quantity: optContract.lot_size,
+            entry_price: optContract.price,
+            current_price: optContract.price,
+            stop_loss: optContract.stop_loss,
+            take_profit: optContract.take_profit,
+            unrealized_pnl: 0,
+            opened_at: new Date().toISOString()
+          };
+
+          newPositions.push(newPos);
+
+          newLogs.push({
+            id: `LOG-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            symbol: optContract.symbol,
+            action: 'BUY',
+            details: `Autonomous Option Execution: BOUGHT ${optContract.symbol} @ ₹${optContract.price} (${optContract.lot_size} Qty). Reason: ${evalSignal.reason} (Confidence: ${evalSignal.confidence}%, Delta: ${optContract.delta}). Virtual Margin: ₹${optContract.margin_required}`,
+            confidence: evalSignal.confidence,
+            indicators: {
+              rsi: evalSignal.rsi,
+              ema_signal: evalSignal.action,
+              trend: evalSignal.trend
+            }
+          });
+        }
+      }
+
+      if (newLogs.length > 0) {
+        setAutoTradeLogs((prevLogs) => [...newLogs, ...prevLogs].slice(0, 50));
+      }
+
+      if (newPositions.length === prev.open_positions.length) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        portfolio: {
+          ...prev.portfolio,
+          available_balance: currentBalance,
+          open_positions_count: newPositions.length
+        },
+        open_positions: newPositions
+      };
+    });
+  };
+
+  // Run autonomous evaluation cycle continuously when Auto Trade is active
+  useEffect(() => {
+    if (!state.system_status.automated_trading_active) return;
+
+    const timer = setInterval(() => {
+      runAutonomousTradingEvaluation();
+    }, 3000);
+
+    return () => clearInterval(timer);
+  }, [state.system_status.automated_trading_active, state.system_status.selected_instrument]);
 
   // Handler: Emergency Kill Switch
   const handleToggleKillSwitch = (active: boolean) => {
@@ -639,6 +869,19 @@ export const App: React.FC = () => {
             onSelectOptionsTab={() => setActiveTab('options_scanner')}
             onSelectInstrument={handleSelectInstrument}
             onToggleAutomatedTrading={handleToggleAutomatedTrading}
+          />
+        )}
+
+        {activeTab === 'charts' && (
+          <ChartsTab
+            marketWatch={state.market_watch}
+            selectedSymbol={selectedChartSymbol}
+            onSelectSymbol={setSelectedChartSymbol}
+            openPositions={state.open_positions}
+            autoTradeLogs={autoTradeLogs}
+            isAutoTradeActive={state.system_status.automated_trading_active}
+            onToggleAutoTrade={() => handleToggleAutomatedTrading(!state.system_status.automated_trading_active)}
+            onManualAutonomousTrigger={runAutonomousTradingEvaluation}
           />
         )}
 

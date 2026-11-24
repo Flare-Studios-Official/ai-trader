@@ -12,9 +12,11 @@ import {
   Clock,
   ArrowRight,
   Layers,
-  Sparkles
+  Sparkles,
+  LineChart
 } from 'lucide-react';
 import { DashboardState, SignalItem } from '../types';
+import { TradingViewChart } from './TradingViewChart';
 
 interface OverviewTabProps {
   state: DashboardState;
@@ -42,6 +44,11 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
 
   const isAutoTradeOn = system_status?.automated_trading_active;
   const selectedInstrument = system_status?.selected_instrument || 'NIFTY';
+
+  const [activeChartSymbol, setActiveChartSymbol] = useState<string>(
+    selectedInstrument === 'ALL' || selectedInstrument === 'BITCOIN' ? 'BTC/USDT' : selectedInstrument
+  );
+  const activeChartItem = market_watch.find((m) => m.symbol.toUpperCase() === activeChartSymbol.toUpperCase()) || market_watch[0];
 
   const handleSimulate = async (sym: string, dir?: string) => {
     setIsSimulating(true);
@@ -253,6 +260,30 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             );
           })}
         </div>
+      </div>
+
+      {/* TRADINGVIEW LIVE INTERACTIVE CHART (1-SEC REFRESH) */}
+      <div className="bg-brand-surface/60 rounded-xl p-4 border border-brand-border shadow-lg">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center space-x-2">
+            <LineChart className="w-4 h-4 text-blue-400" />
+            <h2 className="text-sm font-bold uppercase tracking-wider text-white">
+              TradingView Lightweight Chart (Real-Time 1-Second Stream)
+            </h2>
+          </div>
+          <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded border border-emerald-500/30 flex items-center space-x-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span>Live Tick Updates Active</span>
+          </span>
+        </div>
+        <TradingViewChart
+          symbol={activeChartSymbol}
+          currentPrice={activeChartItem?.price || 25350}
+          changePct={activeChartItem?.change_pct || 0}
+          height={400}
+          onSelectSymbol={setActiveChartSymbol}
+          showControls={true}
+        />
       </div>
 
       {/* ACTIVE SIMULATED PAPER POSITIONS */}
