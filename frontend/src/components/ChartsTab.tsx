@@ -207,6 +207,8 @@ export const ChartsTab: React.FC<ChartsTabProps> = ({
                 autoTradeLogs.map((log) => {
                   const isBuy = log.action === 'BUY';
                   const isClose = log.action === 'CLOSE';
+                  const isCrypto = log.symbol.includes('BTC');
+                  const curr = isCrypto ? '$' : '₹';
                   return (
                     <div
                       key={log.id}
@@ -235,7 +237,7 @@ export const ChartsTab: React.FC<ChartsTabProps> = ({
                             log.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
                           }`}
                         >
-                          Realized PnL: {log.pnl >= 0 ? '+' : ''}₹{log.pnl.toFixed(2)}
+                          Realized PnL: {log.pnl >= 0 ? '+' : ''}{curr}{log.pnl.toFixed(2)}
                         </div>
                       )}
                     </div>

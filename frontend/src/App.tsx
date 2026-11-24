@@ -19,7 +19,8 @@ import {
   subscribeCoinbaseWebSocket,
   generateCandlesForSymbol,
   evaluateIndicators,
-  IndicatorSignal
+  IndicatorSignal,
+  getIndianMarketStatus
 } from './services/marketData';
 
 const INITIAL_STATE: DashboardState = {
@@ -263,12 +264,18 @@ export const App: React.FC = () => {
     return unsubscribe;
   }, []);
 
-  // 1B. Fast 1-Second Micro-Tick Engine for All Instruments
+  // 1B. Fast 1-Second Micro-Tick Engine (Freezes Indian Markets When Closed)
   useEffect(() => {
     const tickInterval = setInterval(() => {
+      const indianStatus = getIndianMarketStatus();
       setState((prev) => {
         const updatedWatch = prev.market_watch.map((m) => {
-          // Micro-tick natural market spread jitter (+/- 0.005%)
+          // If Indian instrument and Indian market is closed (weekend, holiday, or post-market),
+          // DO NOT apply jitter! Keep price strictly frozen at authentic Angel One closing price!
+          if (m.symbol !== 'BTC/USDT' && !indianStatus.isOpen) {
+            return m;
+          }
+          // Micro-tick natural market spread jitter (+/- 0.005%) for active market sessions
           const jitter = (Math.random() - 0.495) * (m.price * 0.0001);
           const newPrice = parseFloat((m.price + jitter).toFixed(2));
           return {
@@ -384,6 +391,7 @@ export const App: React.FC = () => {
           }
         }
 
+        const isCrypto = pos.asset_type === 'CRYPTO_SPOT' || pos.symbol.includes('BTC');
         const priceDiff = pos.side === 'BUY' ? currentPrice - pos.entry_price : pos.entry_price - currentPrice;
         const unrealizedPnl = parseFloat((priceDiff * pos.quantity).toFixed(2));
 
@@ -392,9 +400,16 @@ export const App: React.FC = () => {
         const hitTP = pos.side === 'BUY' ? currentPrice >= pos.take_profit : currentPrice <= pos.take_profit;
 
         if (hitSL || hitTP) {
-          const exitReason = hitTP ? 'Take-Profit Hit (1:2.5 RR)' : 'ATR Stop-Loss Hit';
+          const exitReason = isCrypto
+            ? (hitTP ? 'Bitcoin Scalp Target Hit (+0.5%)' : 'Bitcoin Tight Stop-Loss (-0.5%)')
+            : (hitTP ? 'Option Take-Profit Hit' : 'Option ATR Stop-Loss Hit');
           const realizedPnl = unrealizedPnl;
-          const returnedMargin = (pos.entry_price * pos.quantity) + realizedPnl - 20; // 20 brokerage
+
+          // If crypto, PnL is in dollars, convert margin delta to account INR
+          const returnedMargin = isCrypto
+            ? (pos.entry_price * pos.quantity * 84.0) + (realizedPnl * 84.0) - 20
+            : (pos.entry_price * pos.quantity) + realizedPnl - 20;
+
           balanceChange += returnedMargin;
 
           newlyClosed.push({
@@ -508,16 +523,23 @@ export const App: React.FC = () => {
         }
 
         const isBull = evalSignal.action === 'BUY';
+        // Sizing: Allocate 1/3 of total available balance per trade
+        const targetBudgetINR = Math.max(1000, currentBalance / 3.0);
 
         if (inst === 'BITCOIN') {
-          const qty = 0.05;
-          const margin = qty * mItem.price;
-          if (currentBalance < margin) continue;
-
-          currentBalance -= margin;
+          // Bitcoin is 24/7/365!
+          const targetBudgetUSD = targetBudgetINR / 84.0;
           const entryPrice = mItem.price;
-          const sl = isBull ? entryPrice * 0.988 : entryPrice * 1.012;
-          const tp = isBull ? entryPrice * 1.025 : entryPrice * 0.975;
+          const qty = parseFloat((targetBudgetUSD / entryPrice).toFixed(4));
+          const marginUSD = parseFloat((qty * entryPrice).toFixed(2));
+          const marginINR = parseFloat((marginUSD * 84.0).toFixed(2));
+
+          if (currentBalance < marginINR) continue;
+
+          currentBalance -= marginINR;
+          // Tight 0.5% Take-Profit and 0.5% Stop-Loss
+          const sl = isBull ? entryPrice * 0.995 : entryPrice * 1.005; // 0.5% SL
+          const tp = isBull ? entryPrice * 1.005 : entryPrice * 0.995; // 0.5% TP
           const side = isBull ? 'BUY' : 'SELL';
 
           const posId = `POS-BTC-${Date.now()}`;
@@ -542,7 +564,7 @@ export const App: React.FC = () => {
             timestamp: new Date().toISOString(),
             symbol: 'BTC/USDT',
             action: isBull ? 'BUY' : 'SELL',
-            details: `Autonomous ${side} spot executed on ${evalSignal.reason} (Confidence ${evalSignal.confidence}%, RSI ${evalSignal.rsi}). Virtual Margin: $${margin.toFixed(2)}`,
+            details: `Autonomous ${side} spot: ${qty} BTC @ $${entryPrice.toFixed(2)} (Value: $${marginUSD.toFixed(2)} / ~₹${marginINR.toFixed(0)} — 1/3 Capital). Tight Target: $${tp.toFixed(2)} (+0.5%), SL: $${sl.toFixed(2)} (-0.5%). Indicator: ${evalSignal.reason} (${evalSignal.confidence}% Conf).`,
             confidence: evalSignal.confidence,
             indicators: {
               rsi: evalSignal.rsi,
@@ -551,7 +573,29 @@ export const App: React.FC = () => {
             }
           });
         } else {
-          // Indian Index Options Trading via Black-Scholes contract selector
+          // Indian Index Options (NIFTY, BANKNIFTY, SENSEX, BANKEX)
+          // 1. Check if Indian Market is OPEN!
+          const indianMarketStatus = getIndianMarketStatus();
+          if (!indianMarketStatus.isOpen) {
+            // Market is closed (weekend, holiday, or post-market)
+            // Log market closed status and do not execute live option orders!
+            newLogs.push({
+              id: `LOG-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              timestamp: new Date().toISOString(),
+              symbol: inst,
+              action: 'HOLD' as any,
+              details: `Market Closed: NSE/BSE is currently ${indianMarketStatus.statusLabel} (${indianMarketStatus.message}). Standing by until 9:15 AM IST.`,
+              confidence: 0,
+              indicators: {
+                rsi: mItem.rsi,
+                ema_signal: 'CLOSED',
+                trend: 'NEUTRAL'
+              }
+            });
+            continue;
+          }
+
+          // 2. If market is open, select accurate option contract and allocate 1/3 capital
           const optContract = selectOptionContract(
             inst,
             mItem.price,
@@ -560,16 +604,21 @@ export const App: React.FC = () => {
             mItem.atr || 50
           );
 
-          if (currentBalance < optContract.margin_required) continue;
+          const singleLotCost = optContract.price * optContract.lot_size;
+          const numLots = Math.max(1, Math.floor(targetBudgetINR / singleLotCost));
+          const totalQty = numLots * optContract.lot_size;
+          const totalMarginRequired = parseFloat((numLots * singleLotCost).toFixed(2));
 
-          currentBalance -= optContract.margin_required;
+          if (currentBalance < totalMarginRequired) continue;
+
+          currentBalance -= totalMarginRequired;
           const posId = `POS-${inst}-${Date.now()}`;
           const newPos: OpenPosition = {
             position_id: posId,
             symbol: optContract.symbol,
             asset_type: 'INDEX_F_AND_O',
             side: isBull ? 'BUY_CE' : 'BUY_PE',
-            quantity: optContract.lot_size,
+            quantity: totalQty,
             entry_price: optContract.price,
             current_price: optContract.price,
             stop_loss: optContract.stop_loss,
@@ -585,7 +634,7 @@ export const App: React.FC = () => {
             timestamp: new Date().toISOString(),
             symbol: optContract.symbol,
             action: 'BUY',
-            details: `Autonomous Option Execution: BOUGHT ${optContract.symbol} @ ₹${optContract.price} (${optContract.lot_size} Qty). Reason: ${evalSignal.reason} (Confidence: ${evalSignal.confidence}%, Delta: ${optContract.delta}). Virtual Margin: ₹${optContract.margin_required}`,
+            details: `Autonomous Option: BOUGHT ${numLots} Lots (${totalQty} Qty) of ${optContract.symbol} @ ₹${optContract.price} (~1/3 Capital: ₹${totalMarginRequired.toFixed(0)}). Target: ₹${optContract.take_profit}, SL: ₹${optContract.stop_loss}. Indicator: ${evalSignal.reason} (${evalSignal.confidence}% Conf, Delta ${optContract.delta}).`,
             confidence: evalSignal.confidence,
             indicators: {
               rsi: evalSignal.rsi,
@@ -757,28 +806,34 @@ export const App: React.FC = () => {
     const item = state.market_watch.find((m) => m.symbol === (isCrypto ? 'BTC/USDT' : symbol)) || state.market_watch[0];
     const spotPrice = item.price;
 
+    // 1/3 of total available balance per simulated trade
+    const targetBudgetINR = Math.max(1000, state.portfolio.available_balance / 3.0);
+
     let tradeSymbol = item.symbol;
     let entryPrice = spotPrice;
     let quantity = 1;
-    let marginReq = 10000;
-    let sl = spotPrice * (isBullish ? 0.98 : 1.02);
-    let tp = spotPrice * (isBullish ? 1.04 : 0.96);
+    let marginReq = targetBudgetINR;
+    let sl = spotPrice * (isBullish ? 0.995 : 1.005);
+    let tp = spotPrice * (isBullish ? 1.005 : 0.995);
 
     if (!isCrypto) {
-      // Options Paper Trade
+      // Options Paper Trade (1/3 Capital)
       const opt = selectOptionContract(item.symbol, spotPrice, isBullish, 82, item.atr || 50);
+      const singleLotCost = opt.price * opt.lot_size;
+      const numLots = Math.max(1, Math.floor(targetBudgetINR / singleLotCost));
       tradeSymbol = opt.symbol;
       entryPrice = opt.price;
-      quantity = opt.lot_size;
-      marginReq = opt.margin_required;
+      quantity = numLots * opt.lot_size;
+      marginReq = numLots * singleLotCost;
       sl = opt.stop_loss;
       tp = opt.take_profit;
     } else {
-      // Spot Bitcoin Paper Trade
-      quantity = 0.2; // 0.2 BTC
-      marginReq = parseFloat((entryPrice * quantity).toFixed(2));
-      sl = parseFloat((spotPrice * (isBullish ? 0.985 : 1.015)).toFixed(2));
-      tp = parseFloat((spotPrice * (isBullish ? 1.035 : 0.965)).toFixed(2));
+      // Spot Bitcoin Paper Trade (1/3 Capital, Tight 0.5% Target)
+      const targetBudgetUSD = targetBudgetINR / 84.0;
+      quantity = parseFloat((targetBudgetUSD / spotPrice).toFixed(4));
+      marginReq = targetBudgetINR;
+      sl = parseFloat((spotPrice * (isBullish ? 0.995 : 1.005)).toFixed(2));
+      tp = parseFloat((spotPrice * (isBullish ? 1.005 : 0.995)).toFixed(2));
     }
 
     const newPosition: OpenPosition = {

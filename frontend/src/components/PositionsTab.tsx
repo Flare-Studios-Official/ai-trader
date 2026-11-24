@@ -38,6 +38,8 @@ export const PositionsTab: React.FC<PositionsTabProps> = ({
         <div className="space-y-3">
           {positions.map((pos) => {
             const isProfit = pos.unrealized_pnl >= 0;
+            const isCrypto = pos.asset_type === 'CRYPTO_SPOT' || pos.symbol.includes('BTC');
+            const currency = isCrypto ? '$' : '₹';
             return (
               <div
                 key={pos.position_id}
@@ -52,36 +54,36 @@ export const PositionsTab: React.FC<PositionsTabProps> = ({
                       {pos.side}
                     </span>
                     <span className="text-xs text-brand-muted bg-brand-card px-2 py-0.5 rounded border border-brand-border">
-                      {pos.quantity} Qty
+                      {pos.quantity} {isCrypto ? 'BTC' : 'Qty'}
                     </span>
                     <span className="text-xs text-brand-muted font-mono">{pos.position_id}</span>
                   </div>
 
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-3 text-xs">
                     <div>
-                      <span className="text-[10px] text-brand-muted uppercase block">Entry Price (with Slip)</span>
-                      <strong className="text-white">₹{pos.entry_price.toFixed(2)}</strong>
+                      <span className="text-[10px] text-brand-muted uppercase block">Entry Price</span>
+                      <strong className="text-white">{currency}{pos.entry_price.toFixed(2)}</strong>
                     </div>
                     <div>
                       <span className="text-[10px] text-brand-muted uppercase block">Current Market Price</span>
-                      <strong className="text-white">₹{pos.current_price.toFixed(2)}</strong>
+                      <strong className="text-white">{currency}{pos.current_price.toFixed(2)}</strong>
                     </div>
                     <div>
-                      <span className="text-[10px] text-brand-muted uppercase block">ATR Stop-Loss</span>
-                      <strong className="text-red-400">₹{pos.stop_loss.toFixed(2)}</strong>
+                      <span className="text-[10px] text-brand-muted uppercase block">{isCrypto ? 'Stop-Loss (-0.5%)' : 'ATR Stop-Loss'}</span>
+                      <strong className="text-red-400">{currency}{pos.stop_loss.toFixed(2)}</strong>
                     </div>
                     <div>
-                      <span className="text-[10px] text-brand-muted uppercase block">ATR Take-Profit</span>
-                      <strong className="text-emerald-400">₹{pos.take_profit.toFixed(2)}</strong>
+                      <span className="text-[10px] text-brand-muted uppercase block">{isCrypto ? 'Take-Profit (+0.5%)' : 'ATR Take-Profit'}</span>
+                      <strong className="text-emerald-400">{currency}{pos.take_profit.toFixed(2)}</strong>
                     </div>
                   </div>
                 </div>
 
                 <div className="flex items-center space-x-4 w-full md:w-auto justify-between md:justify-end">
                   <div className="text-right">
-                    <span className="text-[10px] uppercase text-brand-muted font-semibold block">Unrealized MTM</span>
+                    <span className="text-[10px] uppercase text-brand-muted font-semibold block">Unrealized MTM ({isCrypto ? 'USD' : 'INR'})</span>
                     <span className={`text-2xl font-black ${isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {isProfit ? '+' : ''}₹{pos.unrealized_pnl.toFixed(2)}
+                      {isProfit ? '+' : ''}{currency}{pos.unrealized_pnl.toFixed(2)}
                     </span>
                   </div>
                   <button

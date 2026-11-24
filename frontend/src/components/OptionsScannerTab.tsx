@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Layers, RefreshCw, Play, CheckCircle2 } from 'lucide-react';
 import { OptionsChainResponse, OptionStrike } from '../types';
-import { INDEX_CONFIGS, priceOption } from '../services/marketData';
+import { INDEX_CONFIGS, priceOption, getNextWeeklyExpiry } from '../services/marketData';
 
 interface OptionsScannerTabProps {
   onPaperTradeOption?: (symbol: string, optionType: 'CE' | 'PE', strike: number, price: number, lotSize: number) => void;
@@ -32,11 +32,12 @@ export const OptionsScannerTab: React.FC<OptionsScannerTabProps> = ({
       BANKNIFTY: 62585.35,
       FINNIFTY: 28153.50,
       SENSEX: 82435.99,
-      BANKEX: 69450.00
+      BANKEX: 70410.81
     };
     const spot = spotPriceMap[sym] || defaultSpots[sym] || 25000;
     const step = cfg.strike_step;
     const atm = Math.round(spot / step) * step;
+    const expiry = getNextWeeklyExpiry(cfg.expiry_day);
 
     const strikes: OptionStrike[] = [];
     for (let i = -5; i <= 5; i++) {
@@ -48,14 +49,14 @@ export const OptionsScannerTab: React.FC<OptionsScannerTabProps> = ({
         strike,
         is_atm: strike === atm,
         call: {
-          symbol: `${sym} 28NOV ${strike} CE`,
+          symbol: `${sym} ${expiry} ${strike} CE`,
           price: ce.price,
           delta: ce.delta,
           lot_size: cfg.lot_size,
           note: ce.delta > 0.7 ? 'Deep ITM' : ce.delta > 0.45 ? 'ATM/Near ITM' : 'OTM'
         },
         put: {
-          symbol: `${sym} 28NOV ${strike} PE`,
+          symbol: `${sym} ${expiry} ${strike} PE`,
           price: pe.price,
           delta: pe.delta,
           lot_size: cfg.lot_size,

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { DashboardState, SignalItem } from '../types';
 import { TradingViewChart } from './TradingViewChart';
+import { getIndianMarketStatus } from '../services/marketData';
 
 interface OverviewTabProps {
   state: DashboardState;
@@ -49,6 +50,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
     selectedInstrument === 'ALL' || selectedInstrument === 'BITCOIN' ? 'BTC/USDT' : selectedInstrument
   );
   const activeChartItem = market_watch.find((m) => m.symbol.toUpperCase() === activeChartSymbol.toUpperCase()) || market_watch[0];
+  const marketStatus = getIndianMarketStatus();
 
   const handleSimulate = async (sym: string, dir?: string) => {
     setIsSimulating(true);
@@ -172,15 +174,31 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
 
       {/* INDIAN BENCHMARK INDICES GRID (ANGEL ONE SMARTAPI FEED) */}
       <div>
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h2 className="text-sm font-bold uppercase tracking-wider text-white flex items-center space-x-2">
             <TrendingUp className="w-4 h-4 text-blue-400" />
             <span>Indian F&amp;O Benchmark Instruments (Angel One SmartAPI)</span>
           </h2>
-          <span className="text-xs text-emerald-400 font-semibold bg-emerald-500/10 px-2.5 py-0.5 rounded border border-emerald-500/30">
-            ● Authorized Live Quote Feed
+          <span className={`text-xs font-bold px-2.5 py-1 rounded border flex items-center space-x-1.5 ${marketStatus.badgeColor}`}>
+            <span className={`w-2 h-2 rounded-full ${marketStatus.isOpen ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`}></span>
+            <span>{marketStatus.message}</span>
           </span>
         </div>
+
+        {!marketStatus.isOpen && (
+          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-3 text-xs text-amber-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 shadow-sm">
+            <div className="flex items-center space-x-2">
+              <span className="text-base">🏛️</span>
+              <div>
+                <strong>NSE / BSE Exchange Status: {marketStatus.statusLabel}</strong>
+                <p className="text-[11px] text-amber-200/80 mt-0.5">{marketStatus.reason}</p>
+              </div>
+            </div>
+            <span className="text-[11px] font-mono font-bold bg-amber-500/20 px-2 py-1 rounded border border-amber-500/40 whitespace-nowrap">
+              Opens: {marketStatus.nextOpenTime}
+            </span>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {indianItems.map((item) => {
@@ -302,6 +320,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
           <div className="space-y-2">
             {open_positions.map((pos) => {
               const isProfit = pos.unrealized_pnl >= 0;
+              const isCrypto = pos.asset_type === 'CRYPTO_SPOT' || pos.symbol.includes('BTC');
+              const currency = isCrypto ? '$' : '₹';
               return (
                 <div key={pos.position_id} className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 bg-brand-card/70 p-3 rounded-lg border border-brand-border">
                   <div>
@@ -312,24 +332,24 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
                       }`}>
                         {pos.side}
                       </span>
-                      <span className="text-xs text-brand-muted">{pos.quantity} Qty</span>
+                      <span className="text-xs text-brand-muted">{pos.quantity} {isCrypto ? 'BTC' : 'Qty'}</span>
                       <span className="text-[10px] text-brand-muted font-mono bg-brand-surface px-1.5 py-0.2 rounded border border-brand-border">
                         Virtual Execution
                       </span>
                     </div>
                     <div className="flex items-center space-x-3 text-xs text-brand-muted mt-1.5">
-                      <span>Entry: <strong className="text-white">₹{pos.entry_price.toFixed(2)}</strong></span>
-                      <span>LTP: <strong className="text-white">₹{pos.current_price.toFixed(2)}</strong></span>
-                      <span>SL: <strong className="text-red-400">₹{pos.stop_loss.toFixed(2)}</strong></span>
-                      <span>TP: <strong className="text-emerald-400">₹{pos.take_profit.toFixed(2)}</strong></span>
+                      <span>Entry: <strong className="text-white">{currency}{pos.entry_price.toFixed(2)}</strong></span>
+                      <span>LTP: <strong className="text-white">{currency}{pos.current_price.toFixed(2)}</strong></span>
+                      <span>SL: <strong className="text-red-400">{currency}{pos.stop_loss.toFixed(2)}</strong></span>
+                      <span>TP: <strong className="text-emerald-400">{currency}{pos.take_profit.toFixed(2)}</strong></span>
                     </div>
                   </div>
 
                   <div className="flex items-center space-x-4">
                     <div className="text-right">
-                      <span className="text-[9px] uppercase text-brand-muted font-bold block">Simulated MTM</span>
+                      <span className="text-[9px] uppercase text-brand-muted font-bold block">Simulated MTM ({isCrypto ? 'USD' : 'INR'})</span>
                       <span className={`text-lg font-black ${isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {isProfit ? '+' : ''}₹{pos.unrealized_pnl.toFixed(2)}
+                        {isProfit ? '+' : ''}{currency}{pos.unrealized_pnl.toFixed(2)}
                       </span>
                     </div>
                     <button

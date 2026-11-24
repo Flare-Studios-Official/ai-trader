@@ -14,13 +14,134 @@ export interface OptionDetails {
   take_profit: number;
 }
 
-export const INDEX_CONFIGS: Record<string, { strike_step: number; lot_size: number; exchange: string; display_name: string }> = {
-  NIFTY: { strike_step: 50, lot_size: 25, exchange: 'NSE', display_name: 'NIFTY 50' },
-  BANKNIFTY: { strike_step: 100, lot_size: 15, exchange: 'NSE', display_name: 'BANK NIFTY' },
-  FINNIFTY: { strike_step: 50, lot_size: 25, exchange: 'NSE', display_name: 'FIN NIFTY' },
-  SENSEX: { strike_step: 100, lot_size: 10, exchange: 'BSE', display_name: 'BSE SENSEX' },
-  BANKEX: { strike_step: 100, lot_size: 15, exchange: 'BSE', display_name: 'BSE BANKEX' },
+export const INDEX_CONFIGS: Record<string, { strike_step: number; lot_size: number; exchange: string; display_name: string; expiry_day: number }> = {
+  NIFTY: { strike_step: 50, lot_size: 25, exchange: 'NSE', display_name: 'NIFTY 50', expiry_day: 4 }, // Thursday
+  BANKNIFTY: { strike_step: 100, lot_size: 15, exchange: 'NSE', display_name: 'BANK NIFTY', expiry_day: 4 }, // Thursday
+  FINNIFTY: { strike_step: 50, lot_size: 25, exchange: 'NSE', display_name: 'FIN NIFTY', expiry_day: 2 }, // Tuesday
+  SENSEX: { strike_step: 100, lot_size: 10, exchange: 'BSE', display_name: 'BSE SENSEX', expiry_day: 5 }, // Friday
+  BANKEX: { strike_step: 100, lot_size: 15, exchange: 'BSE', display_name: 'BSE BANKEX', expiry_day: 1 }, // Monday
 };
+
+// Computes next upcoming weekly contract expiry date (e.g. 26NOV26)
+export function getNextWeeklyExpiry(expiryDayOfWeek: number = 4): string {
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const ist = new Date(utc + 5.5 * 3600000);
+
+  const currentDay = ist.getDay();
+  let diff = expiryDayOfWeek - currentDay;
+  if (diff < 0 || (diff === 0 && (ist.getHours() * 60 + ist.getMinutes() >= 930))) {
+    diff += 7;
+  }
+  ist.setDate(ist.getDate() + diff);
+
+  const day = String(ist.getDate()).padStart(2, '0');
+  const month = ist.toLocaleString('en-US', { month: 'short' }).toUpperCase();
+  const year = ist.getFullYear().toString().slice(-2);
+  return `${day}${month}${year}`;
+}
+
+// Market Status Checker for NSE & BSE (Hours, Weekends, Holidays)
+export interface MarketStatusInfo {
+  isOpen: boolean;
+  statusLabel: 'OPEN' | 'CLOSED' | 'WEEKEND' | 'HOLIDAY';
+  badgeColor: string;
+  message: string;
+  reason: string;
+  nextOpenTime: string;
+}
+
+export function getIndianMarketStatus(): MarketStatusInfo {
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const istDate = new Date(utc + 5.5 * 3600000);
+
+  const day = istDate.getDay(); // 0 = Sun, 6 = Sat
+  const hours = istDate.getHours();
+  const minutes = istDate.getMinutes();
+  const timeInMinutes = hours * 60 + minutes;
+
+  const year = istDate.getFullYear();
+  const month = String(istDate.getMonth() + 1).padStart(2, '0');
+  const dateNum = String(istDate.getDate()).padStart(2, '0');
+  const dateStr = `${year}-${month}-${dateNum}`;
+
+  // NSE / BSE Declared Trading Holidays
+  const NSE_HOLIDAYS: Record<string, string> = {
+    '2026-11-24': 'Guru Nanak Jayanti / Market Holiday',
+    '2026-12-25': 'Christmas',
+    '2026-01-26': 'Republic Day',
+    '2026-03-08': 'Mahashivratri',
+    '2026-03-25': 'Holi',
+    '2026-04-11': 'Id-Ul-Fitr',
+    '2026-04-14': 'Ambedkar Jayanti',
+    '2026-04-17': 'Ram Navami',
+    '2026-05-01': 'Maharashtra Day',
+    '2026-08-15': 'Independence Day',
+    '2026-10-02': 'Mahatma Gandhi Jayanti',
+    '2026-10-12': 'Dussehra',
+    '2026-11-01': 'Diwali Laxmi Pujan',
+    '2026-11-02': 'Diwali Balipratipada'
+  };
+
+  // 1. Weekend Check
+  if (day === 0 || day === 6) {
+    const isSat = day === 6;
+    return {
+      isOpen: false,
+      statusLabel: 'WEEKEND',
+      badgeColor: 'bg-red-500/20 text-red-400 border-red-500/30',
+      message: `Weekend (${isSat ? 'Saturday' : 'Sunday'}) — NSE/BSE Closed`,
+      reason: 'Exchange is closed on weekends. Quotes represent official Friday closing prices from Angel One.',
+      nextOpenTime: 'Monday 9:15 AM IST'
+    };
+  }
+
+  // 2. Declared Holiday Check
+  if (NSE_HOLIDAYS[dateStr]) {
+    return {
+      isOpen: false,
+      statusLabel: 'HOLIDAY',
+      badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
+      message: `Market Holiday: ${NSE_HOLIDAYS[dateStr]}`,
+      reason: `NSE & BSE are closed today for ${NSE_HOLIDAYS[dateStr]}. Official last closing quotes from Angel One SmartAPI shown.`,
+      nextOpenTime: 'Next Trading Day 9:15 AM IST'
+    };
+  }
+
+  // 3. Regular Session Time Check (09:15 AM to 03:30 PM IST)
+  if (timeInMinutes < 555) {
+    return {
+      isOpen: false,
+      statusLabel: 'CLOSED',
+      badgeColor: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
+      message: 'Pre-Market Session (Exchange Closed)',
+      reason: 'Regular Indian market hours are 9:15 AM to 3:30 PM IST. Opens today at 9:15 AM IST.',
+      nextOpenTime: 'Today 9:15 AM IST'
+    };
+  }
+
+  if (timeInMinutes > 930) {
+    return {
+      isOpen: false,
+      statusLabel: 'CLOSED',
+      badgeColor: 'bg-gray-800 text-gray-300 border-gray-600',
+      message: 'Market Closed (Post-Market)',
+      reason: 'NSE & BSE closed for the day at 3:30 PM IST. Quotes represent official closing rates from Angel One SmartAPI.',
+      nextOpenTime: 'Tomorrow 9:15 AM IST'
+    };
+  }
+
+  // 4. Market is OPEN
+  return {
+    isOpen: true,
+    statusLabel: 'OPEN',
+    badgeColor: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
+    message: 'Live Market Session Active (NSE/BSE)',
+    reason: 'Regular trading session active. Streaming live quotes from Angel One SmartAPI.',
+    nextOpenTime: 'Trading session open until 3:30 PM IST'
+  };
+}
 
 // Black-Scholes Option Pricing Formula
 export function priceOption(
@@ -91,12 +212,8 @@ export function selectOptionContract(
   const optionType: 'CE' | 'PE' = isBullish ? 'CE' : 'PE';
   const { price, delta } = priceOption(spotPrice, strike, 3.0 / 365.0, 0.14, 0.065, isBullish);
 
-  // Format current weekly expiry (e.g. 28-NOV-2024)
-  const d = new Date();
-  const day = d.getDate();
-  const month = d.toLocaleString('en-US', { month: 'short' }).toUpperCase();
-  const year = d.getFullYear().toString().slice(-2);
-  const expiry = `${day}${month}${year}`;
+  // Accurate upcoming weekly expiry (e.g. 26NOV26)
+  const expiry = getNextWeeklyExpiry(cfg.expiry_day);
 
   const symbol = `${underlying} ${expiry} ${strike} ${optionType}`;
   const marginRequired = parseFloat((price * cfg.lot_size).toFixed(2));

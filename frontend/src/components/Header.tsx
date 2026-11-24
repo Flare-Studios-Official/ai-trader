@@ -14,6 +14,7 @@ import {
   Coins
 } from 'lucide-react';
 import { PortfolioSummary, SystemStatus } from '../types';
+import { getIndianMarketStatus } from '../services/marketData';
 
 interface HeaderProps {
   portfolio: PortfolioSummary;
@@ -34,6 +35,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const isAutoTradeOn = systemStatus.automated_trading_active;
   const selectedInstrument = systemStatus.selected_instrument || 'NIFTY';
+  const marketStatus = getIndianMarketStatus();
 
   const instruments = [
     { id: 'ALL', label: 'ALL MARKETS (Autonomous)', icon: '⚡' },
@@ -49,8 +51,13 @@ export const Header: React.FC<HeaderProps> = ({
       {/* LIVE MARKET DATA & STRICT PAPER TRADING BANNER */}
       <div className="bg-emerald-950/40 border-b border-emerald-500/30 px-4 py-1.5 text-center text-xs font-semibold text-emerald-300 flex items-center justify-center space-x-2 flex-wrap">
         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span className="font-bold tracking-wide text-white">LIVE MARKET DATA CONNECTED:</span>
-        <span className="text-emerald-400 font-medium">Angel One SmartAPI (NSE/BSE F&O) &amp; Coinbase Spot (BTC)</span>
+        <span className="font-bold tracking-wide text-white">EXCHANGE STATUS:</span>
+        <span className={`text-[11px] font-bold px-2 py-0.2 rounded border flex items-center space-x-1 ${marketStatus.badgeColor}`}>
+          <span>🏛️ NSE/BSE: {marketStatus.statusLabel} ({marketStatus.message})</span>
+        </span>
+        <span className="text-[11px] font-bold bg-blue-500/20 text-blue-300 px-2 py-0.2 rounded border border-blue-500/40 flex items-center space-x-1">
+          <span>₿ BTC/USDT: 24/7 SPOT LIVE</span>
+        </span>
         <span className="text-gray-400 hidden sm:inline">•</span>
         <span className="text-amber-300 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
           STRICTLY VIRTUAL PAPER TRADING ONLY (ZERO REAL MONEY)

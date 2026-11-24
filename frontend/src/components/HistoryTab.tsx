@@ -69,6 +69,8 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({ trades }) => {
               <tbody className="divide-y divide-brand-border text-gray-200">
                 {trades.map((t) => {
                   const isProfit = t.realized_pnl >= 0;
+                  const isCrypto = t.asset_type === 'CRYPTO_SPOT' || t.symbol.includes('BTC');
+                  const curr = isCrypto ? '$' : '₹';
                   return (
                     <tr key={t.position_id} className="hover:bg-brand-card/40 transition-colors">
                       <td className="py-3 px-3 font-mono text-brand-muted whitespace-nowrap">
@@ -85,19 +87,19 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({ trades }) => {
                         </span>
                       </td>
                       <td className="py-3 px-3 whitespace-nowrap">
-                        {t.quantity}
+                        {t.quantity} {isCrypto ? 'BTC' : ''}
                       </td>
                       <td className="py-3 px-3 whitespace-nowrap">
-                        ₹{t.entry_price.toFixed(2)}
+                        {curr}{t.entry_price.toFixed(2)}
                       </td>
                       <td className="py-3 px-3 whitespace-nowrap">
-                        ₹{t.exit_price ? t.exit_price.toFixed(2) : '-'}
+                        {t.exit_price ? `${curr}${t.exit_price.toFixed(2)}` : '-'}
                       </td>
                       <td className="py-3 px-3 text-amber-400 whitespace-nowrap">
-                        ₹{t.total_charges.toFixed(2)}
+                        {isCrypto ? `$${(t.total_charges / 84).toFixed(2)}` : `₹${t.total_charges.toFixed(2)}`}
                       </td>
                       <td className={`py-3 px-3 font-bold whitespace-nowrap ${isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {isProfit ? '+' : ''}₹{t.realized_pnl.toFixed(2)}
+                        {isProfit ? '+' : ''}{curr}{t.realized_pnl.toFixed(2)}
                       </td>
                       <td className="py-3 px-3 text-brand-muted whitespace-nowrap">
                         {t.exit_reason || 'Manual Exit'}
