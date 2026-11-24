@@ -73,22 +73,37 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
         "BANKEX": ("BSE", "12", 15.0),
     }
 
-    async def get_candles(self, symbol: str, timeframe: str = "5m", bars: int = 150) -> pd.DataFrame:
-        sym = symbol.upper()
-        if sym in self.SYMBOL_MAP:
-            exchange, token, _ = self.SYMBOL_MAP[sym]
-            try:
-                df = await self.client.get_historical_candles(exchange, token, interval="FIVE_MINUTE")
-                if df is not None and not df.empty:
-                    df["data_mode"] = DataMode.LIVE_AUTHORISED_DATA.value
-                    return df
-            except Exception as e:
-                logger.warning(f"Angel One candle fetch failed for {symbol}: {e}. Falling back to demo data.")
+        async def get_candles(
+        self,
+        symbol: str,
+        timeframe: str = "5m",
+        bars: int = 150
+    ) -> pd.DataFrame:
 
-        # Graceful fallback to demo provider for BTC/USDT or when feed is outside hours
-        from app.market_data.demo_provider import DemoMarketDataProvider
-        demo = DemoMarketDataProvider()
-        return await demo.get_candles(symbol, timeframe, bars)
+        sym = symbol.upper()
+
+        if sym not in self.SYMBOL_MAP:
+            raise ValueError(
+                f"{sym} is not supported by the Angel One live feed."
+            )
+
+        exchange, token, _ = self.SYMBOL_MAP[sym]
+
+        df = await self.client.get_historical_candles(
+            exchange,
+            token,
+            interval="FIVE_MINUTE"
+        )
+
+        if df is None or df.empty:
+            raise RuntimeError(
+                f"Angel One returned no live candle data for {sym}."
+            )
+
+        df = df.tail(bars).copy()
+        df["data_mode"] = DataMode.LIVE_AUTHORISED_DATA.value
+
+        return df
 
     async def get_quote(self, symbol: str) -> MarketQuote:
         sym = symbol.upper()
