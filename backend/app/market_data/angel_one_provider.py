@@ -105,32 +105,47 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
 
         return df
 
-    async def get_quote(self, symbol: str) -> MarketQuote:
+        async def get_quote(self, symbol: str) -> MarketQuote:
+
         sym = symbol.upper()
-        if sym in self.SYMBOL_MAP:
-            exchange, token, _ = self.SYMBOL_MAP[sym]
-            try:
-                full_quote = await self.client.get_full_quote(exchange, token)
-                if full_quote:
-                    ltp = float(full_quote.get("ltp", 0.0))
-                    net_change = float(full_quote.get("netChange", 0.0))
-                    pct_change = float(full_quote.get("percentChange", 0.0))
-                    high = float(full_quote.get("high", 0.0))
-                    low = float(full_quote.get("low", 0.0))
-                    volume = float(full_quote.get("tradeVolume", 0.0))
-                    return MarketQuote(
-                        symbol=sym,
-                        price=ltp,
-                        change_24h=net_change,
-                        change_pct_24h=pct_change,
-                        high_24h=high,
-                        low_24h=low,
-                        volume_24h=volume,
-                        timestamp=datetime.now().isoformat(),
-                        data_mode=DataMode.LIVE_AUTHORISED_DATA,
-                        source_label="Angel One SmartAPI Authorised Feed",
-                        asset_type=AssetType.INDEX_F_AND_O
-                    )
+
+        if sym not in self.SYMBOL_MAP:
+            raise ValueError(
+                f"{sym} is not supported by the Angel One live feed."
+            )
+
+        exchange, token, _ = self.SYMBOL_MAP[sym]
+
+        full_quote = await self.client.get_full_quote(
+            exchange,
+            token
+        )
+
+        if not full_quote:
+            raise RuntimeError(
+                f"Angel One live quote unavailable for {sym}."
+            )
+
+        ltp = float(full_quote.get("ltp", 0.0))
+
+        if ltp <= 0:
+            raise RuntimeError(
+                f"Angel One returned an invalid price for {sym}."
+            )
+
+        return MarketQuote(
+            symbol=sym,
+            price=ltp,
+            change_24h=float(full_quote.get("netChange", 0.0)),
+            change_pct_24h=float(full_quote.get("percentChange", 0.0)),
+            high_24h=float(full_quote.get("high", 0.0)),
+            low_24h=float(full_quote.get("low", 0.0)),
+            volume_24h=float(full_quote.get("tradeVolume", 0.0)),
+            timestamp=datetime.now().isoformat(),
+            data_mode=DataMode.LIVE_AUTHORISED_DATA,
+            source_label="Angel One SmartAPI",
+            asset_type=AssetType.INDEX_F_AND_O
+        )
             except Exception as e:
                 logger.warning(f"Angel One quote fetch failed for {symbol}: {e}. Falling back to demo quote.")
 
