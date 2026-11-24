@@ -20,7 +20,11 @@ import {
   generateCandlesForSymbol,
   evaluateIndicators,
   IndicatorSignal,
-  getIndianMarketStatus
+  getIndianMarketStatus,
+  evaluateV12Signal,
+  verifySignalWithAI,
+  V12SignalResult,
+  AIVerificationResult
 } from './services/marketData';
 
 const INITIAL_STATE: DashboardState = {
@@ -225,6 +229,15 @@ export const App: React.FC = () => {
     return [];
   });
 
+  const [autoTradeActivatedAt, setAutoTradeActivatedAt] = useState<number | null>(() => {
+    try {
+      const saved = sessionStorage.getItem('ai_trader_auto_activated_at');
+      if (saved) return parseInt(saved, 10);
+    } catch {}
+    return null;
+  });
+  const [lastEvaluatedSignalTimes, setLastEvaluatedSignalTimes] = useState<Record<string, number>>({});
+
   // Sync state to sessionStorage
   useEffect(() => {
     try {
@@ -237,6 +250,16 @@ export const App: React.FC = () => {
       sessionStorage.setItem('ai_trader_auto_logs', JSON.stringify(autoTradeLogs.slice(-50)));
     } catch {}
   }, [autoTradeLogs]);
+
+  useEffect(() => {
+    try {
+      if (autoTradeActivatedAt) {
+        sessionStorage.setItem('ai_trader_auto_activated_at', autoTradeActivatedAt.toString());
+      } else {
+        sessionStorage.removeItem('ai_trader_auto_activated_at');
+      }
+    } catch {}
+  }, [autoTradeActivatedAt]);
 
   // 1A. Fast 1-Second Coinbase WebSocket Live Feed for Bitcoin
   useEffect(() => {
@@ -469,6 +492,43 @@ export const App: React.FC = () => {
         automated_trading_active: active
       }
     }));
+
+    if (active) {
+      const now = Date.now();
+      setAutoTradeActivatedAt(now);
+      const targetInst = state.system_status.selected_instrument || 'NIFTY';
+      const scanLog: AutoTradeLog = {
+        id: `LOG-AUTO-ON-${now}`,
+        timestamp: new Date().toISOString(),
+        symbol: targetInst === 'ALL' ? 'ALL_MARKETS' : (targetInst === 'BITCOIN' ? 'BTC/USDT' : targetInst),
+        action: 'CLOSE',
+        details: `Auto Trade ENABLED at ${new Date(now).toLocaleTimeString()} IST. Status: STANDBY SCANNING. Waiting for a genuine NEW V12 indicator crossover/breakout on ${targetInst}. Premature historical trades strictly blocked. When a signal triggers, AI will analyze candles & market structure before deciding to trade.`,
+        confidence: 100,
+        indicators: {
+          rsi: 50,
+          ema_signal: 'STANDBY_SCANNING',
+          trend: 'WAITING_FOR_NEW_SIGNAL'
+        }
+      };
+      setAutoTradeLogs((prevLogs) => [scanLog, ...prevLogs].slice(0, 50));
+    } else {
+      setAutoTradeActivatedAt(null);
+      const now = Date.now();
+      const offLog: AutoTradeLog = {
+        id: `LOG-AUTO-OFF-${now}`,
+        timestamp: new Date().toISOString(),
+        symbol: 'SYSTEM',
+        action: 'CLOSE',
+        details: `Auto Trade DISABLED by user at ${new Date(now).toLocaleTimeString()} IST. Scanning stopped.`,
+        confidence: 100,
+        indicators: {
+          rsi: 50,
+          ema_signal: 'OFF',
+          trend: 'STANDBY'
+        }
+      };
+      setAutoTradeLogs((prevLogs) => [offLog, ...prevLogs].slice(0, 50));
+    }
   };
 
   // Handler: Select Active Instrument for AI Trading
@@ -480,16 +540,34 @@ export const App: React.FC = () => {
         selected_instrument: instrument
       }
     }));
+    if (state.system_status.automated_trading_active) {
+      const now = Date.now();
+      setAutoTradeActivatedAt(now);
+      const switchLog: AutoTradeLog = {
+        id: `LOG-SWITCH-${now}`,
+        timestamp: new Date().toISOString(),
+        symbol: instrument === 'BITCOIN' ? 'BTC/USDT' : instrument,
+        action: 'CLOSE',
+        details: `Active Instrument switched to ${instrument}. Standby timer reset: scanning live feed for NEW V12 signal on ${instrument}. Zero premature trades.`,
+        confidence: 100,
+        indicators: {
+          rsi: 50,
+          ema_signal: 'STANDBY_SCANNING',
+          trend: 'RESET'
+        }
+      };
+      setAutoTradeLogs((prevLogs) => [switchLog, ...prevLogs].slice(0, 50));
+    }
   };
 
   // 3. Autonomous Indicator-Based Auto Trading Engine (Executes on its own without requiring user approval)
-  const runAutonomousTradingEvaluation = () => {
+  const runAutonomousTradingEvaluation = (forceSymbol?: string) => {
     setState((prev) => {
-      if (!prev.system_status.automated_trading_active || prev.system_status.kill_switch_active) {
+      if ((!prev.system_status.automated_trading_active && !forceSymbol) || prev.system_status.kill_switch_active) {
         return prev;
       }
 
-      const targetMode = prev.system_status.selected_instrument || 'NIFTY';
+      const targetMode = forceSymbol || prev.system_status.selected_instrument || 'NIFTY';
       const instrumentsToScan =
         targetMode === 'ALL'
           ? ['BITCOIN', 'NIFTY', 'BANKNIFTY', 'SENSEX', 'BANKEX']
@@ -498,6 +576,7 @@ export const App: React.FC = () => {
       let currentBalance = prev.portfolio.available_balance;
       const newPositions: OpenPosition[] = [...prev.open_positions];
       const newLogs: AutoTradeLog[] = [];
+      const newSignals: SignalItem[] = [];
 
       for (const inst of instrumentsToScan) {
         // Enforce max open positions limit for safety
@@ -514,16 +593,89 @@ export const App: React.FC = () => {
         const mItem = prev.market_watch.find((m) => m.symbol.toUpperCase() === searchSym.toUpperCase());
         if (!mItem || mItem.price <= 0) continue;
 
-        // Generate recent candles and evaluate RSI & EMA 9/21 indicators
+        // 1. Generate recent candles and evaluate Stage 1 V12 Indicator
         const candles = generateCandlesForSymbol(mItem.symbol, mItem.price, 40, 60);
-        const evalSignal: IndicatorSignal = evaluateIndicators(candles);
+        const v12Result = evaluateV12Signal(
+          candles,
+          forceSymbol ? null : autoTradeActivatedAt,
+          forceSymbol ? null : lastEvaluatedSignalTimes[inst]
+        );
 
-        if (evalSignal.action === 'HOLD' || evalSignal.confidence < 70) {
+        // If not forced and no fresh crossover occurred since activation, stay in scanning standby mode
+        if (!forceSymbol && (!v12Result.isNewSignal || v12Result.action === 'HOLD')) {
           continue;
         }
 
-        const isBull = evalSignal.action === 'BUY';
-        // Sizing: Allocate 1/3 of total available balance per trade
+        // When forced or when a new signal arrives, evaluate Stage 2: AI Candlestick & Market Verifier
+        // If forced and v12 was HOLD, analyze current candle structure directionally
+        const evalAction = v12Result.action !== 'HOLD' ? v12Result.action : (mItem.rsi >= 50 ? 'BUY' : 'SELL');
+        const activeV12Signal: V12SignalResult = {
+          ...v12Result,
+          action: evalAction
+        };
+
+        const aiResult = verifySignalWithAI(activeV12Signal, candles, mItem);
+
+        // Update tracking to prevent re-evaluating the same candle event
+        if (v12Result.timestamp) {
+          setLastEvaluatedSignalTimes((prevTimes) => ({
+            ...prevTimes,
+            [inst]: v12Result.timestamp
+          }));
+        }
+
+        const isBull = activeV12Signal.action === 'BUY';
+        const tradeSymbol = inst === 'BITCOIN' ? 'BTC/USDT' : inst;
+
+        // Create an audited SignalItem record
+        const signalItem: SignalItem = {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          symbol: tradeSymbol,
+          asset_type: inst === 'BITCOIN' ? 'CRYPTO_SPOT' : 'INDEX_F_AND_O',
+          timestamp: new Date().toISOString(),
+          stage1_signal: activeV12Signal.action,
+          stage1_confidence: activeV12Signal.confidence,
+          close_price: activeV12Signal.close || mItem.price,
+          baseline: activeV12Signal.baseline || mItem.baseline,
+          fuel_state: activeV12Signal.fuelState,
+          rsi: activeV12Signal.rsi,
+          chop_index: activeV12Signal.chopIndex,
+          ai_decision: aiResult.decision,
+          ai_score: aiResult.score,
+          ai_reason: aiResult.reason,
+          ai_breakdown: {
+            candleAnalysis: aiResult.candleAnalysis,
+            marketRegime: aiResult.marketRegime,
+            positiveFactors: aiResult.positiveFactors,
+            warnings: aiResult.warnings
+          },
+          risk_status: aiResult.decision === 'APPROVED' ? 'APPROVED' : 'REJECTED',
+          risk_reason: aiResult.decision === 'APPROVED' ? 'Risk limits & capital checks verified' : 'Vetoed by AI candle/market filter',
+          executed: aiResult.decision === 'APPROVED',
+          data_source: inst === 'BITCOIN' ? 'Coinbase Real-Time Feed' : 'Angel One SmartAPI Live Feed'
+        };
+
+        newSignals.push(signalItem);
+
+        // IF AI REJECTS: Do NOT execute order! Log the rejection reason and protect capital!
+        if (aiResult.decision !== 'APPROVED') {
+          newLogs.push({
+            id: `LOG-REJ-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            symbol: tradeSymbol,
+            action: 'CLOSE',
+            details: `AI VETO / REJECTED V12 ${activeV12Signal.action} (Score ${aiResult.score}/100): ${aiResult.reason}`,
+            confidence: aiResult.score,
+            indicators: {
+              rsi: activeV12Signal.rsi,
+              ema_signal: `V12_${activeV12Signal.action}_REJECTED`,
+              trend: activeV12Signal.fuelState
+            }
+          });
+          continue;
+        }
+
+        // IF AI APPROVES: Allocate 1/3 available capital per trade
         const targetBudgetINR = Math.max(1000, currentBalance / 3.0);
 
         if (inst === 'BITCOIN') {
@@ -564,12 +716,12 @@ export const App: React.FC = () => {
             timestamp: new Date().toISOString(),
             symbol: 'BTC/USDT',
             action: isBull ? 'BUY' : 'SELL',
-            details: `Autonomous ${side} spot: ${qty} BTC @ $${entryPrice.toFixed(2)} (Value: $${marginUSD.toFixed(2)} / ~₹${marginINR.toFixed(0)} — 1/3 Capital). Tight Target: $${tp.toFixed(2)} (+0.5%), SL: $${sl.toFixed(2)} (-0.5%). Indicator: ${evalSignal.reason} (${evalSignal.confidence}% Conf).`,
-            confidence: evalSignal.confidence,
+            details: `AI APPROVED & EXECUTED ${side} spot: ${qty} BTC @ $${entryPrice.toFixed(2)} (Value: $${marginUSD.toFixed(2)} / ~₹${marginINR.toFixed(0)} — 1/3 Capital). Tight Target: $${tp.toFixed(2)} (+0.5%), SL: $${sl.toFixed(2)} (-0.5%). AI Score: ${aiResult.score}/100. ${aiResult.reason}`,
+            confidence: aiResult.score,
             indicators: {
-              rsi: evalSignal.rsi,
-              ema_signal: evalSignal.action,
-              trend: evalSignal.trend
+              rsi: activeV12Signal.rsi,
+              ema_signal: activeV12Signal.action,
+              trend: activeV12Signal.fuelState
             }
           });
         } else {
@@ -578,7 +730,6 @@ export const App: React.FC = () => {
           const indianMarketStatus = getIndianMarketStatus();
           if (!indianMarketStatus.isOpen) {
             // Market is closed (weekend, holiday, or post-market)
-            // Log market closed status and do not execute live option orders!
             newLogs.push({
               id: `LOG-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               timestamp: new Date().toISOString(),
@@ -600,7 +751,7 @@ export const App: React.FC = () => {
             inst,
             mItem.price,
             isBull,
-            evalSignal.confidence,
+            aiResult.score,
             mItem.atr || 50
           );
 
@@ -634,12 +785,12 @@ export const App: React.FC = () => {
             timestamp: new Date().toISOString(),
             symbol: optContract.symbol,
             action: 'BUY',
-            details: `Autonomous Option: BOUGHT ${numLots} Lots (${totalQty} Qty) of ${optContract.symbol} @ ₹${optContract.price} (~1/3 Capital: ₹${totalMarginRequired.toFixed(0)}). Target: ₹${optContract.take_profit}, SL: ₹${optContract.stop_loss}. Indicator: ${evalSignal.reason} (${evalSignal.confidence}% Conf, Delta ${optContract.delta}).`,
-            confidence: evalSignal.confidence,
+            details: `AI APPROVED & EXECUTED Option: BOUGHT ${numLots} Lots (${totalQty} Qty) of ${optContract.symbol} @ ₹${optContract.price} (~1/3 Capital: ₹${totalMarginRequired.toFixed(0)}). Target: ₹${optContract.take_profit}, SL: ₹${optContract.stop_loss}. AI Score: ${aiResult.score}/100, Delta ${optContract.delta}. ${aiResult.reason}`,
+            confidence: aiResult.score,
             indicators: {
-              rsi: evalSignal.rsi,
-              ema_signal: evalSignal.action,
-              trend: evalSignal.trend
+              rsi: activeV12Signal.rsi,
+              ema_signal: activeV12Signal.action,
+              trend: activeV12Signal.fuelState
             }
           });
         }
@@ -649,7 +800,7 @@ export const App: React.FC = () => {
         setAutoTradeLogs((prevLogs) => [...newLogs, ...prevLogs].slice(0, 50));
       }
 
-      if (newPositions.length === prev.open_positions.length) {
+      if (newPositions.length === prev.open_positions.length && newSignals.length === 0) {
         return prev;
       }
 
@@ -660,7 +811,8 @@ export const App: React.FC = () => {
           available_balance: currentBalance,
           open_positions_count: newPositions.length
         },
-        open_positions: newPositions
+        open_positions: newPositions,
+        recent_signals: newSignals.length > 0 ? [...newSignals, ...prev.recent_signals].slice(0, 50) : prev.recent_signals
       };
     });
   };
@@ -936,7 +1088,7 @@ export const App: React.FC = () => {
             autoTradeLogs={autoTradeLogs}
             isAutoTradeActive={state.system_status.automated_trading_active}
             onToggleAutoTrade={() => handleToggleAutomatedTrading(!state.system_status.automated_trading_active)}
-            onManualAutonomousTrigger={runAutonomousTradingEvaluation}
+            onManualAutonomousTrigger={() => runAutonomousTradingEvaluation(selectedChartSymbol === 'BTC/USDT' ? 'BITCOIN' : selectedChartSymbol)}
           />
         )}
 
