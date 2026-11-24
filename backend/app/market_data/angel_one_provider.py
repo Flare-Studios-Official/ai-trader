@@ -45,13 +45,13 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
     def is_connected(self) -> bool:
         return self.client.is_authenticated
 
-    @property
+        @property
     def status_message(self) -> str:
         if not self.client.is_configured():
-            return "STANDBY — Angel One credentials not configured. Using Demo Provider."
+            return "ERROR — Angel One credentials not configured."
         if not self.client.is_authenticated:
-            return "DISCONNECTED — Credentials present but session not established."
-        return "CONNECTED — Authorised Angel One SmartAPI Feed Active"
+            return "DISCONNECTED — Angel One session not authenticated."
+        return "CONNECTED — Angel One authentication established."
 
     def get_supported_instruments(self) -> List[InstrumentMetadata]:
         # Angel One supports Indian equities, indices, and derivatives; BTC/USDT spot is also tracked 24/7
