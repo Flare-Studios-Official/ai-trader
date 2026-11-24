@@ -377,6 +377,339 @@ export function calculateRSI(candles: CandleData[], period: number = 14): number
   return parseFloat((100 - (100 / (1 + rs))).toFixed(1));
 }
 
+export function calculateATR(candles: CandleData[], period: number = 14): number {
+  if (candles.length < 2) return 1.0;
+  let trSum = 0;
+  const count = Math.min(candles.length - 1, period);
+  for (let i = candles.length - count; i < candles.length; i++) {
+    const c = candles[i];
+    const prevC = candles[i - 1];
+    const tr = Math.max(c.high - c.low, Math.abs(c.high - prevC.close), Math.abs(c.low - prevC.close));
+    trSum += tr;
+  }
+  return parseFloat((trSum / count).toFixed(2));
+}
+
+export function calculateChoppinessIndex(candles: CandleData[], period: number = 14): number {
+  if (candles.length <= period) return 50.0;
+  let trSum = 0;
+  let maxHigh = -Infinity;
+  let minLow = Infinity;
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const c = candles[i];
+    const prevC = candles[i - 1];
+    const tr = Math.max(c.high - c.low, Math.abs(c.high - prevC.close), Math.abs(c.low - prevC.close));
+    trSum += tr;
+    if (c.high > maxHigh) maxHigh = c.high;
+    if (c.low < minLow) minLow = c.low;
+  }
+  const range = maxHigh - minLow;
+  if (range <= 0) return 50.0;
+  const chop = 100 * (Math.log10(trSum / range) / Math.log10(period));
+  return parseFloat(Math.min(100, Math.max(0, chop)).toFixed(1));
+}
+
+// Stage 1: V12 Indicator Engine Types and Evaluator
+export interface V12SignalResult {
+  action: 'BUY' | 'SELL' | 'HOLD';
+  isNewSignal: boolean;
+  timestamp: number;
+  close: number;
+  baseline: number;
+  fuelState: string;
+  stretchATR: number;
+  pattern: string;
+  rsi: number;
+  chopIndex: number;
+  confidence: number;
+  reason: string;
+}
+
+export function evaluateV12Signal(
+  candles: CandleData[],
+  autoTradeActivatedAtMs?: number | null,
+  lastSignalTimestampSec?: number | null
+): V12SignalResult {
+  if (candles.length < 25) {
+    return {
+      action: 'HOLD',
+      isNewSignal: false,
+      timestamp: 0,
+      close: 0,
+      baseline: 0,
+      fuelState: 'None',
+      stretchATR: 0,
+      pattern: 'None',
+      rsi: 50,
+      chopIndex: 50,
+      confidence: 50,
+      reason: 'Insufficient candle data for V12 evaluation'
+    };
+  }
+
+  const ema9Series = calculateEMA(candles, 9);
+  const ema21Series = calculateEMA(candles, 21);
+  const lastEma9 = ema9Series[ema9Series.length - 1]?.value || 0;
+  const lastEma21 = ema21Series[ema21Series.length - 1]?.value || 0;
+  const prevEma9 = ema9Series[ema9Series.length - 2]?.value || lastEma9;
+  const prevEma21 = ema21Series[ema21Series.length - 2]?.value || lastEma21;
+
+  const lastCandle = candles[candles.length - 1];
+  const prevCandle = candles[candles.length - 2];
+  const rsi = calculateRSI(candles, 14);
+  const chop = calculateChoppinessIndex(candles, 14);
+  const atr = calculateATR(candles, 14);
+
+  // Baseline is 21-period EMA
+  const baseline = lastEma21;
+  const distFromBaseline = Math.abs(lastCandle.close - baseline);
+  const stretchATR = parseFloat((distFromBaseline / (atr || 1)).toFixed(2));
+
+  let fuelState = 'Moderate Fuel';
+  if (stretchATR > 2.2) fuelState = 'Exhausted (Low Fuel)';
+  else if (stretchATR <= 1.2) fuelState = 'Coiled Spring (Full Fuel)';
+
+  // 15-Bar Box Ceiling/Floor
+  const lookbackCount = Math.min(15, candles.length - 2);
+  let highest15 = -Infinity;
+  let lowest15 = Infinity;
+  for (let i = candles.length - 2 - lookbackCount; i < candles.length - 2; i++) {
+    if (candles[i].high > highest15) highest15 = candles[i].high;
+    if (candles[i].low < lowest15) lowest15 = candles[i].low;
+  }
+
+  // Detect Fresh Crossover Transitions (Event occurred on current bar)
+  const goldenCross = prevEma9 <= prevEma21 && lastEma9 > lastEma21;
+  const deathCross = prevEma9 >= prevEma21 && lastEma9 < lastEma21;
+  const baselineCrossUp = prevCandle.close <= prevEma21 && lastCandle.close > lastEma21;
+  const baselineCrossDown = prevCandle.close >= prevEma21 && lastCandle.close < lastEma21;
+  const boxBreakoutUp = prevCandle.close <= highest15 && lastCandle.close > highest15;
+  const boxBreakoutDown = prevCandle.close >= lowest15 && lastCandle.close < lowest15;
+
+  let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+  let isCrossoverEvent = false;
+  let reason = 'Market scanning live feed. Waiting for fresh V12 crossover trigger';
+
+  if (goldenCross || baselineCrossUp || boxBreakoutUp) {
+    action = 'BUY';
+    isCrossoverEvent = true;
+    if (goldenCross) reason = `EMA 9/21 Golden Cross confirmed on bar (RSI ${rsi.toFixed(1)})`;
+    else if (baselineCrossUp) reason = `Price crossed above 21 Baseline on bar (RSI ${rsi.toFixed(1)})`;
+    else reason = `15-Bar Resistance Breakout above ${highest15.toFixed(2)}`;
+  } else if (deathCross || baselineCrossDown || boxBreakoutDown) {
+    action = 'SELL';
+    isCrossoverEvent = true;
+    if (deathCross) reason = `EMA 9/21 Death Cross confirmed on bar (RSI ${rsi.toFixed(1)})`;
+    else if (baselineCrossDown) reason = `Price crossed below 21 Baseline on bar (RSI ${rsi.toFixed(1)})`;
+    else reason = `15-Bar Support Breakdown below ${lowest15.toFixed(2)}`;
+  }
+
+  // Strict Timing Filter: Was this event strictly AFTER Auto Trade was activated?
+  let isNewSignal = false;
+  if (isCrossoverEvent) {
+    const activationSec = autoTradeActivatedAtMs ? Math.floor(autoTradeActivatedAtMs / 1000) : null;
+    if (activationSec && lastCandle.time < activationSec) {
+      reason = 'Historical crossover occurred before Auto Trade activation. Waiting for live signal.';
+      action = 'HOLD';
+    } else if (lastSignalTimestampSec && lastCandle.time <= lastSignalTimestampSec) {
+      reason = 'Signal on this candle bar has already been evaluated. Standing by.';
+      action = 'HOLD';
+    } else {
+      isNewSignal = true;
+    }
+  }
+
+  // Pattern detection on current candle
+  const range = Math.max(0.01, lastCandle.high - lastCandle.low);
+  const body = Math.abs(lastCandle.close - lastCandle.open);
+  const bodyRatio = body / range;
+  const upperWick = lastCandle.high - Math.max(lastCandle.open, lastCandle.close);
+  const lowerWick = Math.min(lastCandle.open, lastCandle.close) - lastCandle.low;
+
+  let pattern = 'Standard Candle';
+  if (bodyRatio >= 0.70) pattern = lastCandle.close > lastCandle.open ? 'Bullish Marubozu' : 'Bearish Marubozu';
+  else if (lowerWick >= body * 1.8 && upperWick <= body * 0.65) pattern = 'Hammer Absorption';
+  else if (upperWick >= body * 1.8 && lowerWick <= body * 0.65) pattern = 'Shooting Star Rejection';
+
+  return {
+    action,
+    isNewSignal,
+    timestamp: lastCandle.time,
+    close: lastCandle.close,
+    baseline,
+    fuelState,
+    stretchATR,
+    pattern,
+    rsi,
+    chopIndex: chop,
+    confidence: isNewSignal ? 85 : 50,
+    reason
+  };
+}
+
+// Stage 2: Independent AI Candlestick & Market Verification Engine
+export interface AIVerificationResult {
+  decision: 'APPROVED' | 'REJECTED' | 'WAITING';
+  score: number;
+  reason: string;
+  warnings: string[];
+  positiveFactors: string[];
+  candleAnalysis: {
+    bodyRatioPct: number;
+    upperWickPct: number;
+    lowerWickPct: number;
+    pattern: string;
+    isDecisive: boolean;
+  };
+  marketRegime: {
+    fuelState: string;
+    stretchATR: number;
+    chopIndex: number;
+    isChoppy: boolean;
+    rsi: number;
+  };
+}
+
+export function verifySignalWithAI(
+  v12Signal: V12SignalResult,
+  candles: CandleData[],
+  mItem?: any
+): AIVerificationResult {
+  const lastCandle = candles[candles.length - 1];
+  const range = Math.max(0.01, lastCandle.high - lastCandle.low);
+  const body = Math.abs(lastCandle.close - lastCandle.open);
+  const bodyRatio = body / range;
+  const upperWick = lastCandle.high - Math.max(lastCandle.open, lastCandle.close);
+  const upperWickRatio = upperWick / range;
+  const lowerWick = Math.min(lastCandle.open, lastCandle.close) - lastCandle.low;
+  const lowerWickRatio = lowerWick / range;
+
+  let score = 50;
+  const warnings: string[] = [];
+  const positiveFactors: string[] = [];
+
+  const isBuy = v12Signal.action === 'BUY';
+
+  // 1. Candlestick Price Action & Wicks
+  if (isBuy) {
+    if (upperWickRatio > 0.38) {
+      warnings.push(`Heavy upper rejection wick (${(upperWickRatio * 100).toFixed(0)}%). Severe selling resistance at highs.`);
+      score -= 30;
+    } else if (upperWickRatio < 0.18) {
+      positiveFactors.push(`Clean close near candle high (upper wick ${(upperWickRatio * 100).toFixed(0)}%). Strong buyer control.`);
+      score += 15;
+    }
+
+    if (bodyRatio < 0.30) {
+      warnings.push(`Thin/indecisive candle body (${(bodyRatio * 100).toFixed(0)}%). Lacks directional impulse.`);
+      score -= 15;
+    } else if (bodyRatio >= 0.55) {
+      positiveFactors.push(`Strong bullish body (${(bodyRatio * 100).toFixed(0)}% of range).`);
+      score += 15;
+    }
+  } else {
+    // SELL
+    if (lowerWickRatio > 0.38) {
+      warnings.push(`Heavy lower rejection wick (${(lowerWickRatio * 100).toFixed(0)}%). Strong buying absorption at lows.`);
+      score -= 30;
+    } else if (lowerWickRatio < 0.18) {
+      positiveFactors.push(`Clean close near candle low (lower wick ${(lowerWickRatio * 100).toFixed(0)}%). Strong seller control.`);
+      score += 15;
+    }
+
+    if (bodyRatio < 0.30) {
+      warnings.push(`Thin/indecisive candle body (${(bodyRatio * 100).toFixed(0)}%). Lacks directional impulse.`);
+      score -= 15;
+    } else if (bodyRatio >= 0.55) {
+      positiveFactors.push(`Strong bearish body (${(bodyRatio * 100).toFixed(0)}% of range).`);
+      score += 15;
+    }
+  }
+
+  // 2. Fuel Tank (Distance from Baseline)
+  if (v12Signal.stretchATR > 2.2) {
+    warnings.push(`Fuel Tank Depleted: Price stretched ${v12Signal.stretchATR}x ATR from baseline. Climax risk.`);
+    score -= 25;
+  } else if (v12Signal.stretchATR <= 1.2) {
+    positiveFactors.push(`Coiled Spring: Tight baseline alignment (${v12Signal.stretchATR}x ATR). Full fuel runway.`);
+    score += 15;
+  }
+
+  // 3. Market Choppiness
+  if (v12Signal.chopIndex > 58) {
+    warnings.push(`High Market Chop (${v12Signal.chopIndex} > 58). Sideways noise, false breakout risk.`);
+    score -= 25;
+  } else if (v12Signal.chopIndex < 46) {
+    positiveFactors.push(`Clean Trend Regime (Chop ${v12Signal.chopIndex} < 46).`);
+    score += 15;
+  }
+
+  // 4. RSI Sweet Spot
+  if (isBuy) {
+    if (v12Signal.rsi > 72) {
+      warnings.push(`RSI Overbought (${v12Signal.rsi} > 72). Climax top.`);
+      score -= 25;
+    } else if (v12Signal.rsi >= 40 && v12Signal.rsi <= 65) {
+      positiveFactors.push(`RSI in Sweet Spot (${v12Signal.rsi}). Favorable runway.`);
+      score += 15;
+    }
+  } else {
+    if (v12Signal.rsi < 28) {
+      warnings.push(`RSI Oversold (${v12Signal.rsi} < 28). Climax bottom.`);
+      score -= 25;
+    } else if (v12Signal.rsi >= 35 && v12Signal.rsi <= 60) {
+      positiveFactors.push(`RSI in Sweet Spot (${v12Signal.rsi}). Favorable breakdown runway.`);
+      score += 15;
+    }
+  }
+
+  // Multi-bar staircase check (Higher lows / Lower highs)
+  if (candles.length >= 3) {
+    const c3 = candles[candles.length - 3];
+    const c2 = candles[candles.length - 2];
+    const c1 = candles[candles.length - 1];
+    if (isBuy && c1.low >= c2.low && c2.low >= c3.low) {
+      positiveFactors.push('Higher Lows structure confirmed');
+      score += 10;
+    } else if (!isBuy && c1.high <= c2.high && c2.high <= c3.high) {
+      positiveFactors.push('Lower Highs structure confirmed');
+      score += 10;
+    }
+  }
+
+  score = Math.min(98, Math.max(5, score));
+  const decision = score >= 75 ? 'APPROVED' : 'REJECTED';
+
+  let reason = '';
+  if (decision === 'APPROVED') {
+    reason = `AI APPROVED: ${positiveFactors.join('; ')}. High probability setup.`;
+  } else {
+    reason = `AI REJECTED (${score}/100): ${warnings.join('; ') || 'Insufficient multi-factor edge to risk capital'}. Trade blocked to protect capital.`;
+  }
+
+  return {
+    decision,
+    score,
+    reason,
+    warnings,
+    positiveFactors,
+    candleAnalysis: {
+      bodyRatioPct: Math.round(bodyRatio * 100),
+      upperWickPct: Math.round(upperWickRatio * 100),
+      lowerWickPct: Math.round(lowerWickRatio * 100),
+      pattern: v12Signal.pattern,
+      isDecisive: bodyRatio >= 0.45
+    },
+    marketRegime: {
+      fuelState: v12Signal.fuelState,
+      stretchATR: v12Signal.stretchATR,
+      chopIndex: v12Signal.chopIndex,
+      isChoppy: v12Signal.chopIndex > 58,
+      rsi: v12Signal.rsi
+    }
+  };
+}
+
 // Autonomous Trading Indicator Signal Evaluator
 export interface IndicatorSignal {
   action: 'BUY' | 'SELL' | 'HOLD';
