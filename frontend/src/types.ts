@@ -24,6 +24,7 @@ export interface SystemStatus {
   status_message: string;
   is_connected: boolean;
   automated_trading_active: boolean;
+  selected_instrument: string; // NIFTY | BANKNIFTY | SENSEX | BANKEX | BITCOIN
   database_status: string;
   kill_switch_active: boolean;
   today_trades: number;
