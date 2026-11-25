@@ -6,21 +6,25 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'sans-serif'],
+      },
       colors: {
-        brand: {
-          bg: "#0B0E14",
-          surface: "#121722",
-          card: "#182030",
-          border: "#253048",
-          bull: "#00E676",
-          bear: "#FF1744",
-          accent: "#3B82F6",
-          gold: "#F59E0B",
-          text: "#F3F4F6",
-          muted: "#9CA3AF"
-        }
-      }
+        canvas: "#F4F6FA",
+        surface: "#FFFFFF",
+        primary: "#3F5BD9",
+        "primary-dark": "#2D46B8",
+        profit: "#0B9D58",
+        loss: "#E53935",
+        ink: "#0F172A",
+        muted: "#64748B",
+        hairline: "#E2E8F0",
+      },
+      boxShadow: {
+        card: "0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.03)",
+        nav: "0 -2px 10px rgba(15, 23, 42, 0.05)",
+      },
     },
   },
   plugins: [],
-}
+};
