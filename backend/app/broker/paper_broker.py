@@ -55,11 +55,9 @@ class TransactionCharges:
         is_option: bool = True
     ) -> "TransactionCharges":
         if asset_type == AssetType.CRYPTO_SPOT:
-            # 0.1% standard crypto spot taker fee, no Indian taxes
             fee = turnover * 0.001
             return cls(crypto_fee=round(fee, 2), total_charges=round(fee, 2))
 
-        # Indian F&O statutory breakdown
         brokerage = 20.0
         stt = (turnover * (0.001 if is_option else 0.0002)) if not is_buy else 0.0
         exchange = turnover * (0.0005 if is_option else 0.000019)
@@ -130,12 +128,17 @@ class CloudPaperBroker:
 
     def get_portfolio_summary(self) -> Dict[str, Any]:
         unrealized = sum(p.unrealized_pnl for p in self.open_positions.values())
+        invested = sum(
+            (p.entry_price * p.quantity) * (85.0 if p.contract.asset_type == AssetType.CRYPTO_SPOT else 1.0)
+            for p in self.open_positions.values()
+        )
         return {
             "initial_capital": self.initial_capital,
             "available_balance": round(self.available_balance, 2),
+            "invested_amount": round(invested, 2),
             "unrealized_pnl": round(unrealized, 2),
             "realized_pnl": round(self.total_realized_pnl, 2),
-            "net_equity": round(self.available_balance + unrealized, 2),
+            "net_equity": round(self.available_balance + invested + unrealized, 2),
             "total_charges_paid": round(self.total_charges_paid, 2),
             "open_positions_count": len(self.open_positions),
             "total_trades_completed": len(self.trade_history)
@@ -155,7 +158,6 @@ class CloudPaperBroker:
         slippage_amount = round(market_price * self.slippage_pct * slip_direction, 2)
         filled_price = max(0.01, round(market_price + slippage_amount, 2))
         
-        # Turnover calculation: For BTC, value in INR equivalent (~85 rate) for single-currency balance tracking
         usd_rate = 85.0 if contract.asset_type == AssetType.CRYPTO_SPOT else 1.0
         turnover = (filled_price * quantity) * usd_rate
 

@@ -31,8 +31,6 @@ services:
     name: ai-trader-worker
     env: python
     region: singapore
-    
-    plan: free
     buildCommand: "pip install -r backend/requirements.txt"
     startCommand: "cd backend && python -m app.core.automated_trader"
     envVars:
@@ -46,7 +44,7 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
-              - key: ANGEL_API_KEY
+      - key: ANGEL_API_KEY
         sync: false
       - key: ANGEL_CLIENT_CODE
         sync: false

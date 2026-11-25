@@ -34,35 +34,42 @@ class FNOContract:
 
 INDEX_SPECS = {
     "NIFTY": {
-        "lot_size": 25.0,
+        "lot_size": 65.0,
         "strike_step": 50.0,
         "exchange": "NFO",
         "underlying_symbol": "NIFTY 50",
         "asset_type": AssetType.INDEX_F_AND_O
     },
     "BANKNIFTY": {
-        "lot_size": 15.0,
+        "lot_size": 30.0,
         "strike_step": 100.0,
         "exchange": "NFO",
         "underlying_symbol": "NIFTY BANK",
         "asset_type": AssetType.INDEX_F_AND_O
     },
     "FINNIFTY": {
-        "lot_size": 25.0,
+        "lot_size": 60.0,
         "strike_step": 50.0,
         "exchange": "NFO",
         "underlying_symbol": "NIFTY FIN SERVICE",
         "asset_type": AssetType.INDEX_F_AND_O
     },
+    "MIDCPNIFTY": {
+        "lot_size": 120.0,
+        "strike_step": 25.0,
+        "exchange": "NFO",
+        "underlying_symbol": "NIFTY MID SELECT",
+        "asset_type": AssetType.INDEX_F_AND_O
+    },
     "SENSEX": {
-        "lot_size": 10.0,
+        "lot_size": 20.0,
         "strike_step": 100.0,
         "exchange": "BFO",
         "underlying_symbol": "BSE SENSEX",
         "asset_type": AssetType.INDEX_F_AND_O
     },
     "BANKEX": {
-        "lot_size": 15.0,
+        "lot_size": 30.0,
         "strike_step": 100.0,
         "exchange": "BFO",
         "underlying_symbol": "BSE BANKEX",
@@ -168,7 +175,6 @@ class ContractResolver:
                 asset_type=AssetType.INDEX_F_AND_O
             )
 
-        # Options
         if direction_is_buy:
             itype = InstrumentType.INDEX_OPTION_CE
             strike = (atm_strike - step) if prefer_itm else atm_strike

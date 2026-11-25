@@ -57,21 +57,22 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
 
     def get_supported_instruments(self) -> List[InstrumentMetadata]:
         return [
-            InstrumentMetadata("NIFTY", "NIFTY 50", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 25.0, 2, 0, False, "NSE Nifty 50 Index"),
-            InstrumentMetadata("BANKNIFTY", "BANK NIFTY", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 15.0, 2, 0, False, "NSE Bank Nifty Index"),
-            InstrumentMetadata("FINNIFTY", "FIN NIFTY", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 25.0, 2, 0, False, "NSE Financial Services Index"),
-            InstrumentMetadata("SENSEX", "BSE SENSEX", AssetType.INDEX_F_AND_O, "INR", "BSE", 0.05, 10.0, 2, 0, False, "BSE SENSEX Index"),
-            InstrumentMetadata("BANKEX", "BSE BANKEX", AssetType.INDEX_F_AND_O, "INR", "BSE", 0.05, 15.0, 2, 0, False, "BSE BANKEX Index"),
+            InstrumentMetadata("NIFTY", "NIFTY 50", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 65.0, 2, 0, False, "NSE Nifty 50 Index"),
+            InstrumentMetadata("BANKNIFTY", "BANK NIFTY", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 30.0, 2, 0, False, "NSE Bank Nifty Index"),
+            InstrumentMetadata("FINNIFTY", "FIN NIFTY", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 60.0, 2, 0, False, "NSE Financial Services Index"),
+            InstrumentMetadata("MIDCPNIFTY", "NIFTY MIDCAP", AssetType.INDEX_F_AND_O, "INR", "NSE", 0.05, 120.0, 2, 0, False, "NSE Midcap Select Index"),
+            InstrumentMetadata("SENSEX", "BSE SENSEX", AssetType.INDEX_F_AND_O, "INR", "BSE", 0.05, 20.0, 2, 0, False, "BSE SENSEX Index"),
+            InstrumentMetadata("BANKEX", "BSE BANKEX", AssetType.INDEX_F_AND_O, "INR", "BSE", 0.05, 30.0, 2, 0, False, "BSE BANKEX Index"),
             InstrumentMetadata("BTC/USDT", "Bitcoin Spot", AssetType.CRYPTO_SPOT, "USDT", "Coinbase/Spot", 0.01, 1.0, 2, 0, True, "Bitcoin 24/7 Spot Market"),
         ]
 
     SYMBOL_MAP = {
-        "NIFTY": ("NSE", "99926000", 25.0),
-        "BANKNIFTY": ("NSE", "99926009", 15.0),
-        "FINNIFTY": ("NSE", "99926037", 25.0),
-        "MIDCPNIFTY": ("NSE", "99926074", 50.0),
-        "SENSEX": ("BSE", "1", 10.0),
-        "BANKEX": ("BSE", "12", 15.0),
+        "NIFTY": ("NSE", "99926000", 65.0),
+        "BANKNIFTY": ("NSE", "99926009", 30.0),
+        "FINNIFTY": ("NSE", "99926037", 60.0),
+        "MIDCPNIFTY": ("NSE", "99926074", 120.0),
+        "SENSEX": ("BSE", "99919000", 20.0),
+        "BANKEX": ("BSE", "99919012", 30.0),
     }
 
     async def get_candles(
@@ -82,7 +83,6 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
     ) -> pd.DataFrame:
         sym = symbol.upper()
 
-        # Handle BTC/USDT using live Coinbase API
         if sym in ("BTC/USDT", "BTC", "BTCUSDT"):
             return await self._get_live_bitcoin_candles(bars)
 
@@ -101,7 +101,6 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
     async def get_quote(self, symbol: str) -> MarketQuote:
         sym = symbol.upper()
 
-        # Handle BTC/USDT using live Coinbase API
         if sym in ("BTC/USDT", "BTC", "BTCUSDT"):
             return await self._get_live_bitcoin_quote()
 
@@ -165,7 +164,6 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
             except Exception as e:
                 logger.warning(f"Coinbase stats fetch failed: {e}. Trying CoinGecko...")
 
-            # Fallback to CoinGecko
             try:
                 cg_res = await client.get(
                     "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true"
@@ -203,7 +201,6 @@ class AngelOneMarketDataProvider(BaseMarketDataProvider):
                 )
                 if res.status_code == 200:
                     raw_candles = res.json()
-                    # Coinbase format: [time, low, high, open, close, volume]
                     rows = []
                     for c in reversed(raw_candles[:bars]):
                         rows.append({

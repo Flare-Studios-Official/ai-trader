@@ -11,6 +11,7 @@ Features:
 - Strict security: NEVER logs secrets or exposes tokens to the frontend.
 """
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
@@ -185,18 +186,25 @@ class AngelOneClient:
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.post(
-                    f"{self.BASE_URL}/rest/secure/angelbroking/historical/v1/getCandleData",
-                    json=payload,
-                    headers=headers
-                )
-                data = res.json()
-                if data.get("status") and data.get("data"):
-                    # Format: [timestamp, open, high, low, close, volume]
-                    raw_candles = data["data"]
-                    df = pd.DataFrame(raw_candles, columns=["datetime", "open", "high", "low", "close", "volume"])
-                    df["datetime"] = pd.to_datetime(df["datetime"])
-                    return df
+                for attempt in range(3):
+                    res = await client.post(
+                        f"{self.BASE_URL}/rest/secure/angelbroking/historical/v1/getCandleData",
+                        json=payload,
+                        headers=headers
+                    )
+                    if res.status_code == 403 and attempt < 2:
+                        await asyncio.sleep(1.1)
+                        continue
+                    if res.status_code != 200:
+                        logger.warning(f"Angel One candle HTTP {res.status_code} for {exchange}:{symbol_token}")
+                        return None
+                    data = res.json()
+                    if data.get("status") and data.get("data"):
+                        raw_candles = data["data"]
+                        df = pd.DataFrame(raw_candles, columns=["datetime", "open", "high", "low", "close", "volume"])
+                        df["datetime"] = pd.to_datetime(df["datetime"])
+                        return df
+                    return None
                 return None
         except Exception as e:
             logger.error(f"Error fetching historical candles from Angel One: {e}")

@@ -36,7 +36,6 @@ class AutomatedPaperTrader:
         self.risk_manager = DeterministicRiskManager()
         self.paper_broker = CloudPaperBroker(initial_capital=100000.0)
 
-        # Monitored symbols
         self.watched_symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "BANKEX", "BTC/USDT"]
         self.last_processed_timestamps: Dict[str, Any] = {}
         self.candle_tick_counter: int = 0
@@ -72,7 +71,6 @@ class AutomatedPaperTrader:
         2. In Demo mode, advances candle ticks periodically
         3. For each symbol, fetches latest candles & executes pipeline on newly completed bars
         """
-        # Step 1: Monitor open positions against latest market prices
         for sym_key, pos in list(self.paper_broker.open_positions.items()):
             quote = await self.provider.get_quote(pos.contract.underlying)
             curr_underlying_px = quote.price
@@ -97,13 +95,11 @@ class AutomatedPaperTrader:
                 logger.info(f"Position closed automatically: {closed_pos.symbol} (PnL: ₹{closed_pos.realized_pnl})")
                 self._persist_closed_trade(closed_pos)
 
-        # Step 2: In Demo mode, simulate periodic new bar completion every 6 ticks (30 seconds)
         is_demo = hasattr(self.provider, "advance_candle_tick")
         if is_demo and (self.candle_tick_counter % 6 == 0):
             for sym in self.watched_symbols:
                 self.provider.advance_candle_tick(sym)
 
-        # Step 3: Run Strategy Pipeline on latest completed bars
         for sym in self.watched_symbols:
             await self._evaluate_symbol_pipeline(sym)
 
@@ -112,8 +108,8 @@ class AutomatedPaperTrader:
         if df.empty or len(df) < 50:
             return
 
-        latest_candle_time = str(df["datetime"].iloc[-1])
-        # Only process if this is a newly completed candle
+        time_col = "datetime" if "datetime" in df.columns else "timestamp"
+        latest_candle_time = str(df[time_col].iloc[-1])
         if self.last_processed_timestamps.get(symbol) == latest_candle_time:
             return
 
@@ -122,7 +118,6 @@ class AutomatedPaperTrader:
         inst_meta = meta_list[0] if meta_list else None
         asset_type = inst_meta.asset_type if inst_meta else AssetType.INDEX_F_AND_O
 
-        # STAGE 1: Pure V12 Indicator Replica
         df_out, signals = self.v12_engine.compute(df)
         if not signals:
             return
@@ -132,7 +127,6 @@ class AutomatedPaperTrader:
         if not is_latest_bar or last_signal.signal == SignalType.HOLD:
             return
 
-        # STAGE 2: Independent AI Verification
         context = MarketContext(
             symbol=symbol,
             timeframe="5m",
@@ -150,7 +144,6 @@ class AutomatedPaperTrader:
         )
         ai_res = self.ai_verifier.evaluate(last_signal, context)
 
-        # STAGE 3: Deterministic Risk Management
         safe_atr = float(last_signal.meta.get("safe_atr", 50.0))
         contract = ContractResolver.resolve_contract(
             underlying=symbol,
@@ -183,7 +176,6 @@ class AutomatedPaperTrader:
             contract_type="SPOT" if asset_type == AssetType.CRYPTO_SPOT else "OPTION"
         )
 
-        # STAGE 4: Automated Paper Execution
         executed = False
         order_id = None
         fill_price = None
@@ -224,7 +216,6 @@ class AutomatedPaperTrader:
                 self.risk_manager.today_trades_count += 1
                 logger.info(f"Automated paper order filled: {contract.symbol} @ {fill_price}")
 
-        # Persist Signal to DB
         self._persist_signal_log(symbol, asset_type, last_signal, ai_res, risk_res, executed, order_id, fill_price)
 
     def _persist_signal_log(self, symbol, asset_type, sig, ai_res, risk_res, executed, order_id, fill_price):
@@ -297,4 +288,3 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     logger.info("Starting standalone Automated Paper Trader worker...")
     asyncio.run(automated_trader.run_loop())
-

@@ -92,7 +92,6 @@ def test_deterministic_risk_manager_bitcoin_and_cooldown():
         summary_reason="AI Approved"
     )
 
-    # 1. Bitcoin Order evaluation
     res_btc = rm.evaluate_order(
         symbol="BTC/USDT",
         ai_result=ai_approved,
@@ -105,11 +104,9 @@ def test_deterministic_risk_manager_bitcoin_and_cooldown():
     assert res_btc.stop_loss < 68000.0
     assert res_btc.take_profit > 68000.0
 
-    # 2. Simulate position exit and test cooldown
     rm.register_position_exit("BTC/USDT", realized_pnl=250.0)
     assert rm.balance > 100000.0
 
-    # Attempt immediate re-entry on same symbol -> should reject due to cooldown
     res_cooldown = rm.evaluate_order(
         symbol="BTC/USDT",
         ai_result=ai_approved,
@@ -142,14 +139,29 @@ def test_paper_broker_crypto_order_and_fees():
     assert pos is not None
     assert pos.symbol == "BTC/USDT"
     assert broker.available_balance < 100000.0
-    assert pos.total_charges_paid > 0  # 0.1% crypto fee
+    assert pos.total_charges_paid > 0
 
-    # Price rise to 69000
     broker.update_position_price("BTC/USDT", 69000.0)
     assert pos.unrealized_pnl > 0
 
-    # Close
+    summary = broker.get_portfolio_summary()
+    assert summary["invested_amount"] > 0
+    assert summary["net_equity"] == pytest.approx(
+        summary["available_balance"] + summary["invested_amount"] + summary["unrealized_pnl"],
+        abs=0.05
+    )
+
     closed = broker.close_position("BTC/USDT", 69200.0, exit_reason="Target Met")
     assert closed is not None
     assert closed.realized_pnl > 0
     assert len(broker.trade_history) == 1
+
+
+def test_real_indian_lot_sizes():
+    from app.broker.instruments import INDEX_SPECS
+    assert INDEX_SPECS["NIFTY"]["lot_size"] == 65.0
+    assert INDEX_SPECS["BANKNIFTY"]["lot_size"] == 30.0
+    assert INDEX_SPECS["FINNIFTY"]["lot_size"] == 60.0
+    assert INDEX_SPECS["MIDCPNIFTY"]["lot_size"] == 120.0
+    assert INDEX_SPECS["SENSEX"]["lot_size"] == 20.0
+    assert INDEX_SPECS["BANKEX"]["lot_size"] == 30.0

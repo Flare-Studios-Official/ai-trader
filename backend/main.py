@@ -10,7 +10,6 @@ import os
 from typing import Any, Dict, Optional
 from dotenv import load_dotenv
 
-# Load local environment configuration
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 import pandas as pd
@@ -29,10 +28,8 @@ from app.market_data.base import AssetType, DataMode
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Start autonomous background paper trading worker
     automated_trader.start()
     
-    # Broadcast price and state updates periodically
     async def periodic_broadcast():
         while True:
             await asyncio.sleep(4)
@@ -62,7 +59,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "cf-gateway-verified-sec-883a9f")
+GATEWAY_SECRET = os.getenv("GATEWAY_SECRET", "")
 
 
 @app.middleware("http")
@@ -83,8 +80,9 @@ async def verify_gateway_or_local(request, call_next):
     ):
         return await call_next(request)
 
+    expected_secret = os.getenv("GATEWAY_SECRET", "")
     secret_header = request.headers.get("x-gateway-secret")
-    if secret_header != GATEWAY_SECRET:
+    if not expected_secret or secret_header != expected_secret:
         return JSONResponse(
             status_code=401,
             content={"error": "Direct backend access blocked. Gateway verification required."}
@@ -120,7 +118,6 @@ async def angel_one_oauth_callback(
     """
     has_tokens = bool(auth_token or feed_token)
     
-    # If the active provider is Angel One, store the received session tokens in memory
     from app.market_data.angel_one_provider import AngelOneMarketDataProvider
     if isinstance(orchestrator.provider, AngelOneMarketDataProvider):
         if auth_token:
@@ -131,7 +128,6 @@ async def angel_one_oauth_callback(
         if refreshToken:
             orchestrator.provider.client.refresh_token = refreshToken
 
-    # Persist session tokens to PostgreSQL / SQLite database (survives worker restarts)
     if has_tokens:
         db = SessionLocal()
         try:
@@ -218,7 +214,6 @@ async def angel_one_oauth_callback(
 </body>
 </html>"""
     return HTMLResponse(content=html_content, status_code=200)
-
 
 
 @app.get("/api/health")
@@ -457,7 +452,6 @@ async def trigger_simulated_candle(req: TriggerCandleRequest):
         "data_mode": "DEMO_DATA"
     }
 
-    # Pass to automated trader pipeline
     df = await orchestrator.provider.get_candles(sym, timeframe="5m", bars=100)
     df = pd.concat([df, pd.DataFrame([candle])], ignore_index=True)
     if hasattr(orchestrator.provider, "candle_cache"):

@@ -1,3 +1,7 @@
+import os
+os.environ["ENV"] = "test"
+os.environ["MARKET_DATA_PROVIDER"] = "demo"
+
 import pytest
 from fastapi.testclient import TestClient
 from main import app
@@ -24,7 +28,6 @@ def test_overview_endpoint():
     assert data["system_status"]["data_mode"] in ("DEMO_DATA", "LIVE_AUTHORISED_DATA")
     assert any(keyword in data["system_status"]["status_message"] for keyword in ("DEMO", "CONNECTED", "STANDBY"))
 
-    # Check that Bitcoin and Indian indices are present
     symbols = [m["symbol"] for m in data["market_watch"]]
     assert "BTC/USDT" in symbols
     assert "NIFTY" in symbols
@@ -41,7 +44,6 @@ def test_options_scanner_endpoint():
     assert data["underlying"] == "NIFTY"
     assert len(data["strikes"]) > 0
 
-    # BTC options check (explicitly spots only)
     btc_res = client.get("/api/scanner/options?underlying=BTC/USDT")
     assert btc_res.status_code == 200
     assert "Spot" in btc_res.json()["message"]
@@ -74,34 +76,29 @@ def test_simulate_manual_candle():
 
 
 def test_angel_one_oauth_callback():
-    # Test without query params (verification ping)
     res = client.get("/api/auth/angelone/callback")
     assert res.status_code == 200
     assert "text/html" in res.headers["content-type"]
     assert "Angel One SmartAPI" in res.text
     assert "Authentication Callback Verified" in res.text
 
-    # Test with simulated Angel One OAuth redirect tokens
     res_with_tokens = client.get("/api/auth/angelone/callback?auth_token=mock_jwt&feed_token=mock_feed")
     assert res_with_tokens.status_code == 200
     assert "Session authorization tokens were received" in res_with_tokens.text
 
 
-def test_gateway_secret_authorization_barrier():
-    # Direct external caller without gateway secret should be rejected
+def test_gateway_secret_authorization_barrier(monkeypatch):
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("GATEWAY_SECRET", "unit-test-gateway-secret")
     external_client = TestClient(app, client=("198.51.100.25", 54321))
     blocked_res = external_client.get("/api/overview")
     assert blocked_res.status_code == 401
     assert "Direct backend access blocked" in blocked_res.json()["error"]
 
-    # External caller with valid gateway secret should be accepted
-    authorized_res = external_client.get("/api/overview", headers={"x-gateway-secret": "cf-gateway-verified-sec-883a9f"})
+    authorized_res = external_client.get("/api/overview", headers={"x-gateway-secret": "unit-test-gateway-secret"})
     assert authorized_res.status_code == 200
 
-    # Public health check and OAuth callback must remain reachable without secret
     health_res = external_client.get("/api/health")
     assert health_res.status_code == 200
     cb_res = external_client.get("/api/auth/angelone/callback")
     assert cb_res.status_code == 200
-
-
