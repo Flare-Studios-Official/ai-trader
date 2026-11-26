@@ -31,9 +31,17 @@ export const AccountView: React.FC<AccountViewProps> = ({
 }) => {
   const { account, portfolio } = overview;
 
+  const normalizeMode = (m?: string): 'REALTIME_PAPER' | 'PREVIOUS_MARKET' | 'REALTIME_REAL' => {
+    if (m === 'PREVIOUS_MARKET') return 'PREVIOUS_MARKET';
+    if (m === 'REALTIME_REAL' || m === 'REAL_LOCKED') return 'REALTIME_REAL';
+    return 'REALTIME_PAPER';
+  };
+
   const [allocMode, setAllocMode] = useState(account.capital_allocation_mode);
   const [customAlloc, setCustomAlloc] = useState(String(account.custom_allocation_amount || 33333));
-  const [tradingMode, setTradingMode] = useState<'PAPER' | 'REAL_LOCKED'>(account.trading_mode);
+  const [tradingMode, setTradingMode] = useState<'REALTIME_PAPER' | 'PREVIOUS_MARKET' | 'REALTIME_REAL'>(
+    normalizeMode(account.trading_mode)
+  );
   const [riskPct, setRiskPct] = useState(String(account.risk_per_trade_pct));
   const [maxOpenPos, setMaxOpenPos] = useState(String(account.max_open_positions));
   const [maxTradesDay, setMaxTradesDay] = useState(String(account.max_trades_per_day));
@@ -53,7 +61,7 @@ export const AccountView: React.FC<AccountViewProps> = ({
   useEffect(() => {
     setAllocMode(account.capital_allocation_mode);
     setCustomAlloc(String(account.custom_allocation_amount));
-    setTradingMode(account.trading_mode);
+    setTradingMode(normalizeMode(account.trading_mode));
     setRiskPct(String(account.risk_per_trade_pct));
     setMaxOpenPos(String(account.max_open_positions));
     setMaxTradesDay(String(account.max_trades_per_day));
@@ -66,12 +74,18 @@ export const AccountView: React.FC<AccountViewProps> = ({
     setMaxCapPct(String(account.max_capital_used_pct));
   }, [account.updated_at]);
 
-  const saveControls = async (overrideMode?: 'PAPER' | 'REAL_LOCKED') => {
+  const saveControls = async (overrideMode?: 'REALTIME_PAPER' | 'PREVIOUS_MARKET' | 'REALTIME_REAL') => {
     setSaving(true);
     setNotice(null);
+    const chosenMode = overrideMode || tradingMode;
+    if (chosenMode === 'REALTIME_REAL') {
+      setNotice({ ok: false, msg: 'Realtime Real Trading is disabled (Coming Soon). Paper trading only.' });
+      setSaving(false);
+      return;
+    }
     try {
       await updateAccountSettings({
-        trading_mode: overrideMode || tradingMode,
+        trading_mode: chosenMode,
         capital_allocation_mode: allocMode,
         custom_allocation_amount: Number(customAlloc) || 33333,
         risk_per_trade_pct: Number(riskPct) || 1,
@@ -205,55 +219,81 @@ export const AccountView: React.FC<AccountViewProps> = ({
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-bold text-slate-900">Trading Mode</h2>
-            <p className="text-xs text-slate-500">Live Angel One market data • Strict Paper Execution</p>
+            <p className="text-xs text-slate-500">Enforced by cloud backend • Strict Paper Trading Only</p>
           </div>
           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-bold">
             <ShieldCheck className="w-3.5 h-3.5" /> Zero Real Money
           </span>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
           <button
             onClick={() => {
-              setTradingMode('PAPER');
-              saveControls('PAPER');
+              setTradingMode('PREVIOUS_MARKET');
+              saveControls('PREVIOUS_MARKET');
             }}
             className={`p-3 rounded-xl border text-left transition-all ${
-              tradingMode === 'PAPER'
+              tradingMode === 'PREVIOUS_MARKET'
+                ? 'bg-indigo-50/80 border-indigo-600 ring-1 ring-indigo-600'
+                : 'border-slate-200 hover:border-slate-300'
+            }`}
+          >
+            <div className="text-xs font-bold text-slate-900 flex items-center justify-between">
+              <span>1. Previous Market Trading</span>
+              {tradingMode === 'PREVIOUS_MARKET' && <span className="text-[10px] text-indigo-700 font-extrabold">ACTIVE</span>}
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Replay today&apos;s or any past Indian/Bitcoin session chronologically after market hours.
+            </p>
+            {tradingMode === 'PREVIOUS_MARKET' && (
+              <div
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onNavigateTab('charts');
+                }}
+                className="mt-2 inline-flex items-center gap-1 text-[11px] font-bold text-indigo-700 hover:underline"
+              >
+                Open Historical Replay in Charts <ChevronRight className="w-3.5 h-3.5" />
+              </div>
+            )}
+          </button>
+
+          <button
+            onClick={() => {
+              setTradingMode('REALTIME_PAPER');
+              saveControls('REALTIME_PAPER');
+            }}
+            className={`p-3 rounded-xl border text-left transition-all ${
+              tradingMode === 'REALTIME_PAPER'
                 ? 'bg-blue-50/70 border-[#3F5BD9] ring-1 ring-[#3F5BD9]'
                 : 'border-slate-200 hover:border-slate-300'
             }`}
           >
             <div className="text-xs font-bold text-slate-900 flex items-center justify-between">
-              <span>Paper Trading (Simulated)</span>
-              {tradingMode === 'PAPER' && <span className="text-[10px] text-[#3F5BD9]">ACTIVE</span>}
+              <span>2. Realtime Paper Trading</span>
+              {tradingMode === 'REALTIME_PAPER' && <span className="text-[10px] text-[#3F5BD9] font-extrabold">ACTIVE</span>}
             </div>
             <p className="text-[11px] text-slate-500 mt-1">
-              Full cloud automation, real quotes &amp; realistic F&amp;O charges on virtual capital.
+              Default live mode: real-time Angel One &amp; Coinbase prices, 24/7 cloud worker, virtual funds.
             </p>
           </button>
 
           <button
-            onClick={() => {
-              setTradingMode('REAL_LOCKED');
-              saveControls('REAL_LOCKED');
-            }}
-            className={`p-3 rounded-xl border text-left transition-all ${
-              tradingMode === 'REAL_LOCKED'
-                ? 'bg-amber-50 border-amber-400'
-                : 'border-slate-200 bg-slate-50/70'
-            }`}
+            type="button"
+            disabled
+            aria-disabled="true"
+            className="p-3 rounded-xl border border-slate-200 bg-slate-100/80 text-left opacity-75 cursor-not-allowed"
           >
-            <div className="text-xs font-bold text-slate-800 flex items-center justify-between">
+            <div className="text-xs font-bold text-slate-700 flex items-center justify-between">
               <span className="flex items-center gap-1">
-                <Lock className="w-3.5 h-3.5 text-slate-500" /> Real Broker Execution
+                <Lock className="w-3.5 h-3.5 text-slate-500" /> 3. Realtime Real Trading
               </span>
               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-700">
-                LOCKED SAFE
+                COMING SOON
               </span>
             </div>
             <p className="text-[11px] text-slate-500 mt-1">
-              Disabled by safety architecture. Never places live broker orders or risks real funds.
+              Disabled placeholder. No real broker orders or real funds can ever be placed.
             </p>
           </button>
         </div>
