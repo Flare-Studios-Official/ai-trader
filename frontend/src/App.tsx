@@ -56,7 +56,7 @@ export function App() {
 
   useEffect(() => {
     refreshOverview();
-    const iv = setInterval(refreshOverview, 2000);
+    const iv = setInterval(refreshOverview, 1000);
     return () => clearInterval(iv);
   }, [refreshOverview]);
 

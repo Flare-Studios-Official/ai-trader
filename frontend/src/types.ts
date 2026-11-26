@@ -43,7 +43,7 @@ export interface PaperAccount {
   realized_pnl: number;
   today_realized_pnl: number;
   total_charges_paid: number;
-  trading_mode: 'PAPER' | 'REAL_LOCKED';
+  trading_mode: 'REALTIME_PAPER' | 'PREVIOUS_MARKET' | 'REALTIME_REAL' | 'PAPER' | 'REAL_LOCKED';
   capital_allocation_mode: 'ONE_THIRD' | 'TWO_THIRDS' | 'FULL' | 'CUSTOM';
   custom_allocation_amount: number;
   auto_trade_active: boolean;
@@ -288,4 +288,75 @@ export interface ChartTabSpec {
   exchange: string;
   token: string;
   subLabel?: string;
+}
+
+export interface ReplayTradeItem {
+  symbol: string;
+  underlying: string;
+  optionType: string;
+  side: string;
+  quantity: number;
+  lotSize: number;
+  entryTime: number;
+  exitTime: number;
+  entrySpot: number;
+  entryPrice: number;
+  exitPrice: number;
+  investedInr: number;
+  entryCharges: number;
+  exitCharges: number;
+  netPnlInr: number;
+  stopLoss: number;
+  takeProfit: number;
+  aiScore: number;
+  entryReason: string;
+  exitReason: string;
+}
+
+export interface ReplaySignalItem {
+  barTime: number;
+  signal: 'BUY' | 'SELL';
+  decision: 'APPROVED' | 'REJECTED' | 'WAITING';
+  score: number;
+  reason: string;
+  spotPrice: number;
+  contract: string;
+}
+
+export interface ReplaySession {
+  id: string;
+  symbol: string;
+  exchange: string;
+  session_date: string;
+  timeframe: string;
+  strategy_version: string;
+  status: string;
+  initial_capital: number;
+  final_capital: number;
+  net_pnl: number;
+  total_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  max_drawdown: number;
+  profit_factor: number;
+  candles_count: number;
+  trades_json: ReplayTradeItem[];
+  signals_json: ReplaySignalItem[];
+  created_at: string;
+}
+
+export interface HistoricalCandlesResponse {
+  ok: boolean;
+  error?: string;
+  symbol: string;
+  displayName?: string;
+  exchange?: string;
+  date?: string;
+  timeframe?: string;
+  sessionStartSec?: number;
+  sessionEndSec?: number;
+  candles: CandlePoint[];
+  sessionCandlesCount?: number;
+  source?: string;
 }
