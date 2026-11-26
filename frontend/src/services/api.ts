@@ -135,3 +135,31 @@ export async function triggerEngineRunNow(): Promise<any> {
 export async function fetchReports(): Promise<any> {
   return requestJson('/reports');
 }
+
+export async function fetchHistoricalCandles(params: {
+  symbol: string;
+  date: string;
+  timeframe: string;
+}): Promise<import('../types').HistoricalCandlesResponse> {
+  const q = new URLSearchParams({
+    symbol: params.symbol,
+    date: params.date,
+    timeframe: params.timeframe,
+  });
+  return requestJson(`/historical-candles?${q.toString()}`);
+}
+
+export async function runHistoricalReplay(params: {
+  symbol: string;
+  date: string;
+  timeframe: string;
+}): Promise<{ ok: boolean; session: import('../types').ReplaySession }> {
+  return requestJson('/replay/run', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function fetchReplaySessions(): Promise<{ sessions: import('../types').ReplaySession[] }> {
+  return requestJson('/replay/sessions');
+}
