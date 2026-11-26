@@ -60,13 +60,43 @@ export const POPULAR_EQUITY_TOKENS: Record<string, { symbol: string; name: strin
 
 const ANGEL_BASE = "https://apiconnect.angelone.in";
 
+export interface AngelCredentials {
+  apiKey: string;
+  clientCode: string;
+  pin: string;
+  totpSecret: string;
+}
+
 export function isAngelConfigured(): boolean {
-  return Boolean(
-    Deno.env.get("ANGEL_API_KEY") &&
-    Deno.env.get("ANGEL_CLIENT_CODE") &&
-    Deno.env.get("ANGEL_PIN") &&
-    Deno.env.get("ANGEL_TOTP_SECRET")
-  );
+  return true;
+}
+
+export async function resolveAngelCredentials(supabase: SupabaseClient): Promise<AngelCredentials | null> {
+  const envKey = Deno.env.get("ANGEL_API_KEY");
+  const envCode = Deno.env.get("ANGEL_CLIENT_CODE");
+  const envPin = Deno.env.get("ANGEL_PIN");
+  const envTotp = Deno.env.get("ANGEL_TOTP_SECRET");
+
+  if (envKey && envCode && envPin && envTotp) {
+    return { apiKey: envKey, clientCode: envCode, pin: envPin, totpSecret: envTotp };
+  }
+
+  const { data: row } = await supabase
+    .from("system_kv")
+    .select("value")
+    .eq("key", "angel_one_credentials")
+    .maybeSingle();
+
+  const creds = row?.value as { api_key?: string; client_code?: string; pin?: string; totp_secret?: string } | undefined;
+  if (creds?.api_key && creds?.client_code && creds?.pin && creds?.totp_secret) {
+    return {
+      apiKey: creds.api_key,
+      clientCode: creds.client_code,
+      pin: creds.pin,
+      totpSecret: creds.totp_secret,
+    };
+  }
+  return null;
 }
 
 export async function generateTotp(base32Secret: string): Promise<string> {
@@ -106,7 +136,7 @@ export async function generateTotp(base32Secret: string): Promise<string> {
   return String(binCode % 1000000).padStart(6, "0");
 }
 
-function buildAngelHeaders(jwtToken?: string): Record<string, string> {
+function buildAngelHeaders(apiKey: string, jwtToken?: string): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Accept": "application/json",
@@ -115,7 +145,7 @@ function buildAngelHeaders(jwtToken?: string): Record<string, string> {
     "X-ClientLocalIP": "127.0.0.1",
     "X-ClientPublicIP": Deno.env.get("ANGEL_CLIENT_PUBLIC_IP") || "49.43.222.66",
     "X-MACAddress": "fe80::1",
-    "X-PrivateKey": Deno.env.get("ANGEL_API_KEY") || "",
+    "X-PrivateKey": apiKey,
   };
   if (jwtToken) {
     headers["Authorization"] = `Bearer ${jwtToken}`;
@@ -123,12 +153,15 @@ function buildAngelHeaders(jwtToken?: string): Record<string, string> {
   return headers;
 }
 
+let inflightAuth: Promise<{ ok: true; jwt: string; apiKey: string } | { ok: false; error: string }> | null = null;
+
 export async function getAngelJwtToken(
   supabase: SupabaseClient,
   forceRefresh = false
-): Promise<{ ok: true; jwt: string } | { ok: false; error: string }> {
-  if (!isAngelConfigured()) {
-    return { ok: false, error: "Angel One SmartAPI secrets missing in Supabase Edge Secrets" };
+): Promise<{ ok: true; jwt: string; apiKey: string } | { ok: false; error: string }> {
+  const creds = await resolveAngelCredentials(supabase);
+  if (!creds) {
+    return { ok: false, error: "Angel One SmartAPI credentials not configured in environment or database" };
   }
 
   if (!forceRefresh) {
@@ -140,44 +173,52 @@ export async function getAngelJwtToken(
 
     const sess = cached?.value as { jwt_token?: string; expires_at?: number } | undefined;
     if (sess?.jwt_token && sess?.expires_at && Date.now() < sess.expires_at) {
-      return { ok: true, jwt: sess.jwt_token };
+      return { ok: true, jwt: sess.jwt_token, apiKey: creds.apiKey };
     }
   }
 
-  try {
-    const totp = await generateTotp(Deno.env.get("ANGEL_TOTP_SECRET") || "");
-    const res = await fetch(`${ANGEL_BASE}/rest/auth/angelbroking/user/v1/loginByPassword`, {
-      method: "POST",
-      headers: buildAngelHeaders(),
-      body: JSON.stringify({
-        clientcode: Deno.env.get("ANGEL_CLIENT_CODE"),
-        password: Deno.env.get("ANGEL_PIN"),
-        totp,
-      }),
-    });
+  if (inflightAuth) return inflightAuth;
 
-    const data = await res.json();
-    if (!data?.status || !data?.data?.jwtToken) {
-      return { ok: false, error: data?.message || `Angel One login failed (${res.status})` };
-    }
+  inflightAuth = (async () => {
+    try {
+      const totp = await generateTotp(creds.totpSecret);
+      const res = await fetch(`${ANGEL_BASE}/rest/auth/angelbroking/user/v1/loginByPassword`, {
+        method: "POST",
+        headers: buildAngelHeaders(creds.apiKey),
+        body: JSON.stringify({
+          clientcode: creds.clientCode,
+          password: creds.pin,
+          totp,
+        }),
+      });
 
-    const jwtToken = String(data.data.jwtToken);
-    await supabase.from("system_kv").upsert({
-      key: "angel_one_session",
-      value: {
-        jwt_token: jwtToken,
-        feed_token: data.data.feedToken || null,
-        refresh_token: data.data.refreshToken || null,
-        expires_at: Date.now() + 6 * 3600 * 1000,
+      const data = await res.json();
+      if (!data?.status || !data?.data?.jwtToken) {
+        return { ok: false, error: data?.message || `Angel One login failed (${res.status})` };
+      }
+
+      const jwtToken = String(data.data.jwtToken);
+      await supabase.from("system_kv").upsert({
+        key: "angel_one_session",
+        value: {
+          jwt_token: jwtToken,
+          feed_token: data.data.feedToken || null,
+          refresh_token: data.data.refreshToken || null,
+          expires_at: Date.now() + 6 * 3600 * 1000,
+          updated_at: new Date().toISOString(),
+        },
         updated_at: new Date().toISOString(),
-      },
-      updated_at: new Date().toISOString(),
-    });
+      });
 
-    return { ok: true, jwt: jwtToken };
-  } catch (e) {
-    return { ok: false, error: `Angel One network auth error: ${String(e)}` };
-  }
+      return { ok: true, jwt: jwtToken, apiKey: creds.apiKey };
+    } catch (e) {
+      return { ok: false, error: `Angel One network auth error: ${String(e)}` };
+    } finally {
+      inflightAuth = null;
+    }
+  })();
+
+  return inflightAuth;
 }
 
 export async function fetchAngelQuotes(
@@ -200,7 +241,7 @@ export async function fetchAngelQuotes(
     try {
       const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/market/v1/quote`, {
         method: "POST",
-        headers: buildAngelHeaders(auth.jwt),
+        headers: buildAngelHeaders(auth.apiKey, auth.jwt),
         body: JSON.stringify({ mode: "FULL", exchangeTokens: cleanTokens }),
       });
 
@@ -294,7 +335,7 @@ export async function fetchAngelCandles(
     try {
       const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
         method: "POST",
-        headers: buildAngelHeaders(auth.jwt),
+        headers: buildAngelHeaders(auth.apiKey, auth.jwt),
         body: JSON.stringify({
           exchange,
           symboltoken: token,
@@ -377,5 +418,149 @@ export async function fetchAngelCandles(
     }
   }
 
+  return { ok: false, error: "Historical candle fetch exhausted retries" };
+}
+
+/**
+ * Fetches upcoming distinct OPTIDX expiries for an index using cursor stepping
+ * so dense strike chains never truncate later expiries under PostgREST row limits.
+ */
+export async function fetchUpcomingExpiries(
+  supabase: SupabaseClient,
+  underlying: string,
+  optionExch: string,
+  istDateStr: string,
+  maxExpiries = 5
+): Promise<Array<{ expiry: string; expiryDate: string; lotSize: number }>> {
+  const expiries: Array<{ expiry: string; expiryDate: string; lotSize: number }> = [];
+  let cursorDate = istDateStr;
+  for (let step = 0; step < maxExpiries; step++) {
+    let q = supabase
+      .from("instrument_master")
+      .select("expiry, expiry_date, lotsize")
+      .eq("name", underlying)
+      .eq("exch_seg", optionExch)
+      .eq("instrumenttype", "OPTIDX")
+      .order("expiry_date", { ascending: true })
+      .limit(1);
+    q = step === 0 ? q.gte("expiry_date", cursorDate) : q.gt("expiry_date", cursorDate);
+    const { data: expOne } = await q;
+    if (!expOne || expOne.length === 0) break;
+    const r = expOne[0];
+    expiries.push({
+      expiry: String(r.expiry),
+      expiryDate: String(r.expiry_date),
+      lotSize: Number(r.lotsize || 1),
+    });
+    cursorDate = String(r.expiry_date);
+  }
+  return expiries;
+}
+
+/**
+ * Fetches actual historical intraday candles for a specific IST date (YYYY-MM-DD)
+ * plus prior warmup days for indicator initialization (EMA200/V12), strictly cut off at dateYmd 15:30 IST.
+ */
+export async function fetchAngelHistoricalCandlesForDate(
+  supabase: SupabaseClient,
+  exchange: string,
+  token: string,
+  dateYmd: string,
+  timeframe: string = "5m"
+): Promise<{ ok: true; candles: CandleBar[]; sessionStartSec: number; sessionEndSec: number } | { ok: false; error: string }> {
+  const intervalMap: Record<string, { api: string; warmupDays: number }> = {
+    "1m": { api: "ONE_MINUTE", warmupDays: 4 },
+    "3m": { api: "THREE_MINUTE", warmupDays: 7 },
+    "5m": { api: "FIVE_MINUTE", warmupDays: 12 },
+    "15m": { api: "FIFTEEN_MINUTE", warmupDays: 25 },
+    "1h": { api: "ONE_HOUR", warmupDays: 60 },
+  };
+  const spec = intervalMap[timeframe] || intervalMap["5m"];
+
+  const istOffsetMs = 5.5 * 3600 * 1000;
+  const targetStartIstMs = Date.parse(`${dateYmd}T09:15:00Z`);
+  const targetEndIstMs = Date.parse(`${dateYmd}T15:30:00Z`);
+  if (!Number.isFinite(targetStartIstMs) || !Number.isFinite(targetEndIstMs)) {
+    return { ok: false, error: `Invalid date format '${dateYmd}'. Expected YYYY-MM-DD.` };
+  }
+
+  const sessionStartSec = Math.floor((targetStartIstMs - istOffsetMs) / 1000);
+  const sessionEndSec = Math.floor((targetEndIstMs - istOffsetMs) / 1000);
+  const warmupFromMs = targetStartIstMs - spec.warmupDays * 86400 * 1000;
+
+  const fmtIst = (ms: number) => {
+    const d = new Date(ms);
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    return `${y}-${m}-${day} ${hh}:${mm}`;
+  };
+
+  let auth = await getAngelJwtToken(supabase, false);
+  if (!auth.ok) return auth;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+        method: "POST",
+        headers: buildAngelHeaders(auth.apiKey, auth.jwt),
+        body: JSON.stringify({
+          exchange,
+          symboltoken: token,
+          interval: spec.api,
+          fromdate: fmtIst(warmupFromMs),
+          todate: fmtIst(targetEndIstMs),
+        }),
+      });
+      const rawText = await res.text();
+      if (res.status === 403 || rawText.includes("exceeding access rate")) {
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1100));
+          continue;
+        }
+        return { ok: false, error: "Angel One historical rate limit reached" };
+      }
+      if (res.status === 401 && attempt === 0) {
+        auth = await getAngelJwtToken(supabase, true);
+        if (!auth.ok) return auth;
+        continue;
+      }
+      const json = JSON.parse(rawText);
+      if (!json?.status) {
+        return { ok: false, error: json?.message || "Historical candles unavailable" };
+      }
+      const rawList = (json.data || []) as Array<[string, number, number, number, number, number]>;
+      const byTime = new Map<number, CandleBar>();
+      for (const row of rawList) {
+        const tsMs = Date.parse(row[0]);
+        if (!Number.isFinite(tsMs)) continue;
+        const sec = Math.floor(tsMs / 1000);
+        if (sec <= sessionEndSec) {
+          byTime.set(sec, {
+            time: sec,
+            open: Number(row[1]),
+            high: Number(row[2]),
+            low: Number(row[3]),
+            close: Number(row[4]),
+            volume: Number(row[5] || 0),
+          });
+        }
+      }
+      const candles = Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+      const sessionCandles = candles.filter((c) => c.time >= sessionStartSec && c.time <= sessionEndSec);
+      if (sessionCandles.length === 0) {
+        return {
+          ok: false,
+          error: `No Indian market session candles found for ${dateYmd} (may be a weekend, NSE holiday, or future/unsettled date).`,
+        };
+      }
+      return { ok: true, candles, sessionStartSec, sessionEndSec };
+    } catch (e) {
+      if (attempt === 2) return { ok: false, error: `Historical fetch failed: ${String(e)}` };
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }
   return { ok: false, error: "Historical candle fetch exhausted retries" };
 }
