@@ -421,6 +421,8 @@ export function computeAllocatedBudget(account: any): number {
   return Math.max(0, Math.min(avail, remainingCapCeiling, desired));
 }
 
+export const STRATEGY_VERSION = "v1_recovered_enhanced_v2";
+
 export function evaluateWithAIBrain(
   sig: V12State,
   candles5m: CandleBar[],
@@ -471,114 +473,158 @@ export function evaluateWithAIBrain(
   }
 
   const ageSec = Math.floor(Date.now() / 1000) - sig.barTime;
-  if (ageSec > 1800) {
+  if (ageSec > 1800 && !(account as any).__isReplay) {
     warnings.push(`Stale candle timestamp (${Math.round(ageSec / 60)}m old)`);
     return makeReject(10, `Data is stale (${Math.round(ageSec / 60)}m old). AI refuses to trade stale prices.`);
   }
 
-  let mtfScore = 10;
+  // Factor A (Max 25 pts): Original v1 Macro EMA 50/200 Concordance + 15m HTF + ADX
+  const closes5 = candles5m.map((c) => c.close);
+  const ema50Arr = calcEma(closes5, 50);
+  const ema200Arr = calcEma(closes5, 200);
+  const ema50 = ema50Arr[ema50Arr.length - 1] ?? sig.closePrice;
+  const ema200 = ema200Arr[ema200Arr.length - 1] ?? sig.closePrice;
+  const above200 = sig.closePrice > ema200;
+  const emaAligned = isBull ? ema50 > ema200 : ema50 < ema200;
+  const macroBullOk = isBull ? (above200 && emaAligned) : (!above200 && emaAligned);
+  const macroPartialOk = isBull ? (above200 || emaAligned) : (!above200 || emaAligned);
+
+  const adx5 = calcAdx(candles5m, 14);
+  let adx15 = 22;
+  let aligned15 = true;
   let mtfNote = '15m neutral';
   if (candles15m.length >= 25) {
     const v12_15m = computeV12Engine(candles15m);
-    const adx15 = calcAdx(candles15m, 14);
+    adx15 = calcAdx(candles15m, 14);
     const last15 = v12_15m[v12_15m.length - 1];
     if (last15) {
-      const aligned = isBull ? last15.trendDir === 1 : last15.trendDir === -1;
-      if (aligned && adx15 >= 22) {
-        mtfScore = 20;
-        mtfNote = `15m trend aligned (${last15.trendDir === 1 ? 'BULL' : 'BEAR'}, ADX ${adx15})`;
-      } else if (aligned) {
-        mtfScore = 14;
-        mtfNote = `15m aligned, moderate ADX (${adx15})`;
-      } else {
-        mtfScore = 4;
-        mtfNote = `Counter-trend vs 15m (${last15.trendDir === 1 ? 'BULL' : 'BEAR'})`;
-        warnings.push(mtfNote);
-      }
+      aligned15 = isBull ? last15.trendDir === 1 : last15.trendDir === -1;
+      mtfNote = aligned15
+        ? `15m aligned (${last15.trendDir === 1 ? 'BULL' : 'BEAR'}, ADX15 ${adx15})`
+        : `Counter-trend vs 15m (${last15.trendDir === 1 ? 'BULL' : 'BEAR'}, ADX15 ${adx15})`;
+      if (!aligned15) warnings.push(mtfNote);
     }
   }
-  breakdown['multi_timeframe'] = { score: mtfScore, max: 20, note: mtfNote };
 
-  let candleScore = 12;
+  let trendScore = macroBullOk ? 15 : macroPartialOk ? 8 : 2;
+  if (!macroPartialOk) warnings.push(`${sig.signal} against macro EMA50/200`);
+  if (adx5 >= 25) trendScore += 10;
+  else if (adx5 >= 18) trendScore += 6;
+  else {
+    trendScore += 2;
+    warnings.push(`Weak trend strength (ADX5 ${adx5} < 18)`);
+  }
+  breakdown['trend_concordance'] = {
+    score: trendScore,
+    max: 25,
+    note: `${mtfNote}; EMA200 ${above200 ? 'above' : 'below'}, ADX5 ${adx5}`,
+  };
+
+  // Factor B (Max 20 pts): Momentum, RSI & Candle Structure
+  let momScore = 8;
   const oppWick = isBull ? sig.upperWickRatio : sig.lowerWickRatio;
-  if (sig.bodyRatio >= 0.55 && oppWick <= 0.22) {
-    candleScore = 20;
-  } else if (sig.bodyRatio >= 0.38 && oppWick <= 0.35) {
-    candleScore = 14;
-  } else {
-    candleScore = 4;
-    if (oppWick > 0.38) warnings.push(`Heavy opposing rejection wick (${Math.round(oppWick * 100)}%)`);
-    if (sig.bodyRatio < 0.35) warnings.push(`Weak candle body (${Math.round(sig.bodyRatio * 100)}%)`);
-  }
-  breakdown['candle_strength'] = {
-    score: candleScore,
-    max: 20,
-    note: `Body ${Math.round(sig.bodyRatio * 100)}%, OppWick ${Math.round(oppWick * 100)}% (${sig.patternText})`,
-  };
-
-  let srScore = 10;
-  if (sig.hittingWall) {
-    srScore = 2;
-    warnings.push(`Firing into 15-bar S/R wall (Room: ${sig.roomToWallAtr} ATR)`);
-  } else if (sig.roomToWallAtr >= 1.5 || (isBull ? sig.higherLowStaircase : sig.lowerHighStaircase)) {
-    srScore = 15;
-  }
-  breakdown['market_structure'] = {
-    score: srScore,
-    max: 15,
-    note: `Wall room ${sig.roomToWallAtr} ATR${sig.higherLowStaircase ? ' + HL Staircase' : ''}${sig.lowerHighStaircase ? ' + LH Staircase' : ''}`,
-  };
-
-  const adx5 = calcAdx(candles5m, 14);
-  let regimeScore = 10;
-  if (sig.isExhausted || sig.isSidewaysBox || sig.chopIndex > 61.8) {
-    regimeScore = 2;
-    if (sig.isExhausted) warnings.push(`Climax exhaustion (${sig.stretchAtr}x ATR)`);
-    if (sig.chopIndex > 61.8) warnings.push(`Choppy sideways market (Chop ${sig.chopIndex})`);
-  } else if (sig.chopIndex < 48 && adx5 >= 22) {
-    regimeScore = 15;
-  } else if (adx5 < 16) {
-    regimeScore = 6;
-    warnings.push(`Low trend strength (ADX ${adx5})`);
-  }
-  breakdown['volatility_chop'] = { score: regimeScore, max: 15, note: `Chop ${sig.chopIndex}, ADX5 ${adx5}` };
-
-  let momScore = 10;
   if (isBull) {
-    if (sig.rsi > 74) { momScore = 2; warnings.push(`RSI Overbought (${sig.rsi})`); }
-    else if (sig.rsi >= 48 && sig.rsi <= 65 && sig.confidence >= 60) momScore = 15;
+    if (sig.rsi >= 50 && sig.rsi <= 65) momScore = 12;
+    else if (sig.rsi > 65 && sig.rsi <= 72) momScore = 8;
+    else if (sig.rsi > 74) { momScore = 2; warnings.push(`RSI Overbought (${sig.rsi})`); }
+    else momScore = 5;
   } else {
-    if (sig.rsi < 26) { momScore = 2; warnings.push(`RSI Oversold (${sig.rsi})`); }
-    else if (sig.rsi >= 35 && sig.rsi <= 52 && sig.confidence >= 60) momScore = 15;
+    if (sig.rsi >= 35 && sig.rsi <= 50) momScore = 12;
+    else if (sig.rsi >= 28 && sig.rsi < 35) momScore = 8;
+    else if (sig.rsi < 26) { momScore = 2; warnings.push(`RSI Oversold (${sig.rsi})`); }
+    else momScore = 5;
   }
-  breakdown['momentum_rsi'] = { score: momScore, max: 15, note: `RSI ${sig.rsi}, V12 Conf ${sig.confidence}%` };
+  if (sig.bodyRatio >= 0.50 && oppWick <= 0.25) momScore += 8;
+  else if (sig.bodyRatio >= 0.38 && oppWick <= 0.35) momScore += 5;
+  else {
+    momScore += 1;
+    if (oppWick > 0.35) warnings.push(`Rejection wick (${Math.round(oppWick * 100)}%)`);
+    if (sig.bodyRatio < 0.38) warnings.push(`Weak body (${Math.round(sig.bodyRatio * 100)}%)`);
+  }
+  breakdown['momentum_candle'] = {
+    score: momScore,
+    max: 20,
+    note: `RSI ${sig.rsi}, Body ${Math.round(sig.bodyRatio * 100)}%, OppWick ${Math.round(oppWick * 100)}% (${sig.patternText})`,
+  };
 
-  let liqScore = 15;
-  let liqNote = 'Spot high liquidity';
+  // Factor C (Max 20 pts): Volatility Regime, Chop Index & Structure Walls
+  let volScore = sig.chopIndex < 50 ? 12 : sig.chopIndex <= 61.8 ? 8 : 2;
+  if (sig.chopIndex > 60) warnings.push(`Choppy market (Chop ${sig.chopIndex})`);
+  if (sig.roomToWallAtr >= 1.2 || (isBull ? sig.higherLowStaircase : sig.lowerHighStaircase)) volScore += 8;
+  else if (!sig.hittingWall) volScore += 4;
+  if (sig.isExhausted) {
+    volScore = Math.round(volScore * 0.3);
+    warnings.push(`Climax exhaustion (${sig.stretchAtr}x ATR)`);
+  }
+  if (sig.hittingWall) {
+    volScore = Math.round(volScore * 0.4);
+    warnings.push(`Firing into 15-bar S/R wall (${sig.roomToWallAtr} ATR)`);
+  }
+  breakdown['volatility_structure'] = {
+    score: volScore,
+    max: 20,
+    note: `Chop ${sig.chopIndex}, Room ${sig.roomToWallAtr} ATR`,
+  };
+
+  // Factor D (Max 15 pts): Volume Confirmation & Option Liquidity
+  const vols5 = candles5m.map((c) => Number(c.volume || 0));
+  const recentVols = vols5.slice(-21, -1);
+  const avgVol20 = recentVols.length > 0 ? recentVols.reduce((a, b) => a + b, 0) / recentVols.length : 0;
+  const curVol = vols5[vols5.length - 1] || 0;
+  const volRatio = avgVol20 > 0 ? curVol / avgVol20 : 1.0;
+
+  let liqScore = volRatio >= 1.15 ? 8 : volRatio >= 0.8 ? 5 : 2;
+  if (avgVol20 > 0 && volRatio < 0.8) warnings.push(`Low volume (${volRatio.toFixed(2)}x avg)`);
+
+  let liqNote = `Vol ${volRatio.toFixed(2)}x SMA20`;
   if (!isCrypto && candidate.optionType !== 'SPOT') {
     if (candidate.ltp <= 1.0) {
       liqScore = 0;
       warnings.push('Contract price too low / invalid LTP');
     } else if (candidate.spreadPct > 0.05) {
-      liqScore = 3;
+      liqScore = 1;
       warnings.push(`Wide bid-ask spread (${(candidate.spreadPct * 100).toFixed(1)}%)`);
     } else if (candidate.oi <= 0 && candidate.volume <= 0 && candidate.optionType !== 'EQ') {
-      liqScore = 2;
+      liqScore = 1;
       warnings.push('Zero OI and Zero Volume on contract');
     } else {
-      liqNote = `OI ${candidate.oi.toLocaleString()}, Vol ${candidate.volume.toLocaleString()}, Spread ${(candidate.spreadPct * 100).toFixed(2)}%`;
+      liqScore += 7;
+      liqNote = `Vol ${volRatio.toFixed(2)}x; OI ${candidate.oi.toLocaleString()}, Spread ${(candidate.spreadPct * 100).toFixed(2)}%`;
     }
+  } else {
+    liqScore += 7;
   }
-  breakdown['liquidity_spread'] = { score: liqScore, max: 15, note: liqNote };
+  breakdown['volume_liquidity'] = { score: liqScore, max: 15, note: liqNote };
 
-  const totalScore = Math.round(mtfScore + candleScore + srScore + regimeScore + momScore + liqScore);
+  // Factor E (Max 20 pts): Stage 1 V12 Confidence Inheritance
+  const stage1Score = Math.round((sig.confidence / 100) * 20);
+  breakdown['stage1_v12'] = {
+    score: stage1Score,
+    max: 20,
+    note: `V12 Conf ${sig.confidence}% (${sig.fuelState})`,
+  };
+
+  const totalScore = Math.round(trendScore + momScore + volScore + liqScore + stage1Score);
   const strengthLabel: 'STRONG' | 'MODERATE' | 'WEAK' =
-    totalScore >= 82 && sig.bodyRatio >= 0.5 && sig.chopIndex < 50 ? 'STRONG' : totalScore >= 72 ? 'MODERATE' : 'WEAK';
+    totalScore >= 82 && sig.bodyRatio >= 0.5 && sig.chopIndex < 52 ? 'STRONG' : totalScore >= 70 ? 'MODERATE' : 'WEAK';
 
-  if (sig.isExhausted || sig.hittingWall || totalScore < 72 || liqScore <= 3) {
+  // Hard Quality Gates: prevent the counter-trend & low-ADX losses seen in live logs
+  const hardCounterTrend = !aligned15 && (adx15 >= 18 || !macroPartialOk);
+  const hardDeadChop = adx5 < 17 || sig.chopIndex > 60.5 || sig.isSidewaysBox;
+  if (hardCounterTrend) warnings.push('Blocked counter-trend entry against 15m/EMA200');
+  if (hardDeadChop) warnings.push(`Blocked choppy/weak regime (ADX5 ${adx5}, Chop ${sig.chopIndex})`);
+
+  if (
+    sig.isExhausted ||
+    sig.hittingWall ||
+    hardCounterTrend ||
+    hardDeadChop ||
+    totalScore < 70 ||
+    liqScore <= 3
+  ) {
     return makeReject(
       totalScore,
-      `AI Rejected ${sig.signal} (Score ${totalScore}/100): ${warnings.join('; ') || 'Multi-factor setup below 72/100 conviction threshold'}.`,
+      `AI Rejected ${sig.signal} (Score ${totalScore}/100): ${warnings.join('; ') || 'Setup below 70/100 conviction threshold'}.`,
       strengthLabel
     );
   }
@@ -592,11 +638,13 @@ export function evaluateWithAIBrain(
   const maxRiskByPct = totalEquity * (Number(account.risk_per_trade_pct || 1.0) / 100);
 
   if (isCrypto) {
-    const slPct = Math.max(0.2, Number(account.stop_loss_pct || 0.5)) / 100;
-    const tpPct = Math.max(0.25, Number(account.target_profit_pct || 0.5)) / 100;
-    const atrPct = Math.max(0.0025, (sig.atr / sig.closePrice) * 1.25);
-    const effSlPct = Math.max(slPct, Math.min(slPct * 1.5, atrPct));
-    const effTpPct = strengthLabel === 'STRONG' ? Math.max(tpPct, effSlPct * 1.35) : Math.max(tpPct, effSlPct * 1.15);
+    // Enforce minimum SL/TP above 0.40% round-trip friction (fees + slippage) so winners actually beat fees
+    const cfgSlPct = Math.max(0.85, Number(account.stop_loss_pct || 0.95)) / 100;
+    const cfgTpPct = Math.max(1.65, Number(account.target_profit_pct || 2.0)) / 100;
+    const atrSlPct = (sig.atr * 2.0) / Math.max(1, sig.closePrice);
+    const atrTpPct = (sig.atr * 4.0) / Math.max(1, sig.closePrice);
+    const effSlPct = Math.max(cfgSlPct, Math.min(0.025, atrSlPct));
+    const effTpPct = Math.max(cfgTpPct, effSlPct * 2.0, atrTpPct);
 
     const budgetUsd = budgetInr / usdInrRate;
     const maxQtyByAlloc = budgetUsd / candidate.ltp;
@@ -618,7 +666,7 @@ export function evaluateWithAIBrain(
     return {
       decision: 'APPROVED',
       score: totalScore,
-      reason: `AI Approved BTC ${sig.signal} (Score ${totalScore}/100, ${strengthLabel}): 15m ${mtfNote}; ${breakdown['candle_strength'].note}; R:R ${rr}:1.`,
+      reason: `AI Approved BTC ${sig.signal} [${STRATEGY_VERSION}] (Score ${totalScore}/100, ${strengthLabel}): ${mtfNote}; ADX5 ${adx5}; Vol ${volRatio.toFixed(2)}x; R:R ${rr}:1.`,
       warnings,
       breakdown,
       suggestedLots: 1,
@@ -645,45 +693,47 @@ export function evaluateWithAIBrain(
     );
   }
 
+  // Original v1 ATR multipliers: 1.5x ATR SL, 2.5x ATR TP (1.67:1 R:R)
   const delta = Math.max(0.25, Math.abs(candidate.approxDelta || 0.5));
-  const optAtr = Math.max(2.5, sig.atr * delta);
-  const minSafeSlPts = Math.max(tick * 10, optAtr * 0.85);
-  const naturalSlPts = Math.max(minSafeSlPts, optAtr * 1.25);
+  const optAtr = Math.max(3.0, sig.atr * delta);
+  const minSafeSlPts = Math.max(tick * 20, optAtr * 1.15);
+  const naturalSlPts = Math.max(minSafeSlPts, optAtr * 1.5);
 
-  const configuredMaxLoss = Number(account.indian_max_loss_inr || 700);
-  const maxAllowedLossInr = Math.min(configuredMaxLoss, Math.max(configuredMaxLoss * 0.6, maxRiskByPct));
+  const configuredMaxLoss = Number(account.indian_max_loss_inr || 1000);
+  const maxAllowedLossInr = Math.min(configuredMaxLoss, Math.max(configuredMaxLoss * 0.7, maxRiskByPct));
 
   let lots = Math.min(maxLotsAfford, Math.max(1, Math.floor(maxAllowedLossInr / (naturalSlPts * lotSize))));
   const minLossForOneLot = minSafeSlPts * lotSize + 55;
-  if (minLossForOneLot > maxAllowedLossInr * 1.15) {
+  if (minLossForOneLot > maxAllowedLossInr * 1.25) {
     warnings.push(`Minimum structural SL for 1 lot (₹${minLossForOneLot.toFixed(0)}) exceeds max loss limit ₹${maxAllowedLossInr.toFixed(0)}`);
     return makeReject(totalScore, `AI Skipped: ${warnings[warnings.length - 1]}. Protecting loss ceiling.`, strengthLabel);
   }
 
+  const isLongEntry = candidate.optionType === 'CE' || candidate.optionType === 'PE' || isBull;
   lots = Math.max(1, Math.min(maxLotsAfford, lots));
   const qty = lots * lotSize;
   const slPts = Math.max(minSafeSlPts, Math.min(naturalSlPts, Math.max(1, maxAllowedLossInr - 50) / qty));
   const roundedSlPts = Math.round(slPts / tick) * tick;
-  const stopLoss = Math.max(tick, Math.round((candidate.ltp - roundedSlPts) * 100) / 100);
+  const stopLoss = Math.max(tick, Math.round((isLongEntry ? candidate.ltp - roundedSlPts : candidate.ltp + roundedSlPts) * 100) / 100);
 
-  const minTargetPref = Number(account.indian_min_target_inr || 500);
+  const minTargetPref = Number(account.indian_min_target_inr || 600);
   const rawDesiredTargetInr =
     strengthLabel === 'STRONG'
-      ? Math.min(1000, Math.max(minTargetPref + 150, 750))
-      : Math.min(700, Math.max(350, minTargetPref));
+      ? Math.min(1800, Math.max(minTargetPref + 300, 1000))
+      : Math.min(1200, Math.max(500, minTargetPref));
 
-  const structuralRoomPts = Math.max(optAtr * 1.5, Math.max(1.2, sig.roomToWallAtr) * optAtr * 0.85);
+  const structuralRoomPts = Math.max(optAtr * 2.5, Math.max(1.5, sig.roomToWallAtr) * optAtr * 1.1);
   const targetPtsFromPref = (rawDesiredTargetInr + 55) / qty;
-  const tpPts = Math.min(structuralRoomPts, Math.max(roundedSlPts * 1.25, targetPtsFromPref));
+  const tpPts = Math.min(structuralRoomPts, Math.max(roundedSlPts * 1.67, targetPtsFromPref));
   const roundedTpPts = Math.round(tpPts / tick) * tick;
-  const takeProfit = Math.round((candidate.ltp + roundedTpPts) * 100) / 100;
+  const takeProfit = Math.round((isLongEntry ? candidate.ltp + roundedTpPts : Math.max(tick, candidate.ltp - roundedTpPts)) * 100) / 100;
 
   const estCharges = 55;
   const maxLossInr = Math.round((roundedSlPts * qty + estCharges) * 100) / 100;
   const expProfitInr = Math.round((roundedTpPts * qty - estCharges) * 100) / 100;
   const rr = Math.round((expProfitInr / Math.max(1, maxLossInr)) * 100) / 100;
 
-  if (expProfitInr < 280 || rr < 1.1) {
+  if (expProfitInr < 320 || rr < 1.35) {
     return makeReject(
       totalScore,
       `AI Skipped: Net target ₹${expProfitInr.toFixed(0)} / Risk ₹${maxLossInr.toFixed(0)} (R:R ${rr}:1) insufficient for structural room (${sig.roomToWallAtr} ATR).`,
@@ -694,7 +744,7 @@ export function evaluateWithAIBrain(
   return {
     decision: 'APPROVED',
     score: totalScore,
-    reason: `AI Approved ${candidate.symbol} (${strengthLabel}, Score ${totalScore}/100): Target ~₹${expProfitInr.toFixed(0)}, Max Risk ~₹${maxLossInr.toFixed(0)} (R:R ${rr}:1). ${breakdown['candle_strength'].note}.`,
+    reason: `AI Approved ${candidate.symbol} [${STRATEGY_VERSION}] (${strengthLabel}, Score ${totalScore}/100): Target ~₹${expProfitInr.toFixed(0)}, Max Risk ~₹${maxLossInr.toFixed(0)} (R:R ${rr}:1). ${mtfNote}.`,
     warnings,
     breakdown,
     suggestedLots: lots,
