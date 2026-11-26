@@ -7,10 +7,12 @@ import {
   AngelQuoteItem,
   CandleBar,
   fetchAngelCandles,
+  fetchAngelHistoricalCandlesForDate,
   fetchAngelQuotes,
+  fetchUpcomingExpiries,
   isAngelConfigured,
 } from "../_shared/angelOne.ts";
-import { fetchBitcoinCandles, fetchBitcoinQuote, fetchUsdInrRate } from "../_shared/cryptoFeed.ts";
+import { fetchBitcoinCandles, fetchBitcoinHistoricalCandlesForDate, fetchBitcoinQuote, fetchUsdInrRate } from "../_shared/cryptoFeed.ts";
 import {
   formatIstDateYmd,
   getCryptoSession,
@@ -22,8 +24,12 @@ import {
   AICandidateContract,
   computeAllocatedBudget,
   computeV12Engine,
+  evaluateWithAIBrain,
+  STRATEGY_VERSION,
 } from "../_shared/quantEngine.ts";
 import {
+  calcCryptoFee,
+  calcIndianFnOCharges,
   closePaperPosition,
   openPaperPosition,
   selectRealOptionCandidate,
@@ -218,11 +224,8 @@ async function ensureFreshQuotes(
 
   let angelError: string | null = null;
   if (niftyAgeMs > maxIndAgeMs || Number(niftyRow?.ltp || 0) <= 0 || needsExtraRefresh || openPositions.some((p) => p.exchange !== "CRYPTO")) {
-    if (!isAngelConfigured()) {
-      angelError = "Angel One SmartAPI secrets missing in Supabase Edge Secrets";
-    } else {
-      const exchangeTokens: Record<string, string[]> = { NSE: [], BSE: [], NFO: [], BFO: [] };
-      const metaByKey = new Map<string, { symbol: string; displayName: string; assetType: string }>();
+    const exchangeTokens: Record<string, string[]> = { NSE: [], BSE: [], NFO: [], BFO: [] };
+    const metaByKey = new Map<string, { symbol: string; displayName: string; assetType: string }>();
 
       for (const spec of Object.values(CORE_INDICES)) {
         exchangeTokens[spec.exchange].push(spec.token);
@@ -297,7 +300,6 @@ async function ensureFreshQuotes(
           upserts.push(row);
         }
       }
-    }
   }
 
   if (upserts.length > 0) {
@@ -429,24 +431,19 @@ Deno.serve(async (req: Request) => {
       const overallPnl = Math.round((portfolioValue - initCap) * 100) / 100;
       const todayPnl = Math.round((Number(account.today_realized_pnl || 0) + openUnrealizedInr) * 100) / 100;
 
-      const { data: expMeta } = await supabase
-        .from("instrument_master")
-        .select("name, expiry, expiry_date, lotsize")
-        .eq("instrumenttype", "OPTIDX")
-        .gte("expiry_date", indianSession.istDateStr)
-        .order("expiry_date", { ascending: true })
-        .limit(600);
-
       const indexMeta: Record<string, { nearestExpiry: string; expiryDate: string; lotSize: number }> = {};
-      for (const r of expMeta || []) {
-        if (!indexMeta[r.name]) {
-          indexMeta[r.name] = {
-            nearestExpiry: r.expiry,
-            expiryDate: r.expiry_date,
-            lotSize: Number(r.lotsize || 1),
-          };
-        }
-      }
+      await Promise.all(
+        Object.entries(CORE_INDICES).map(async ([idxName, idxSpec]) => {
+          const upcoming = await fetchUpcomingExpiries(supabase, idxName, idxSpec.optionExch, indianSession.istDateStr, 1);
+          if (upcoming.length > 0) {
+            indexMeta[idxName] = {
+              nearestExpiry: upcoming[0].expiry,
+              expiryDate: upcoming[0].expiryDate,
+              lotSize: upcoming[0].lotSize,
+            };
+          }
+        })
+      );
 
       return jsonResponse({
         account: {
@@ -606,30 +603,14 @@ Deno.serve(async (req: Request) => {
         return jsonResponse({ error: `Unsupported F&O underlying ${underlying}` }, 400);
       }
 
-      const { data: expRows } = await supabase
-        .from("instrument_master")
-        .select("expiry, expiry_date, lotsize")
-        .eq("name", underlying)
-        .eq("exch_seg", spec.optionExch)
-        .eq("instrumenttype", "OPTIDX")
-        .gte("expiry_date", indianSession.istDateStr)
-        .order("expiry_date", { ascending: true })
-        .limit(300);
-
-      if (!expRows || expRows.length === 0) {
+      const upcoming = await fetchUpcomingExpiries(supabase, underlying, spec.optionExch, indianSession.istDateStr, 5);
+      if (upcoming.length === 0) {
         return jsonResponse({ error: `No options synced for ${underlying}. Run sync-instruments.` }, 404);
       }
 
-      const expiries: Array<{ expiry: string; expiryDate: string }> = [];
-      const seenExp = new Set<string>();
-      for (const r of expRows) {
-        if (!seenExp.has(r.expiry_date)) {
-          seenExp.add(r.expiry_date);
-          expiries.push({ expiry: r.expiry, expiryDate: r.expiry_date });
-        }
-      }
+      const expiries = upcoming.map((e) => ({ expiry: e.expiry, expiryDate: e.expiryDate }));
       const chosenExpiry = expiries.find((e) => e.expiryDate === reqExpiry || e.expiry === reqExpiry)?.expiryDate || expiries[0].expiryDate;
-      const lotSize = Number(expRows[0]?.lotsize || 1);
+      const lotSize = upcoming[0].lotSize || 1;
 
       const spotRes = await fetchAngelQuotes(supabase, { [spec.exchange]: [spec.token] });
       let spotPrice = 0;
@@ -790,6 +771,12 @@ Deno.serve(async (req: Request) => {
       const isCrypto = isCryptoInstrument(selected);
 
       if (active) {
+        if (account.trading_mode === "REALTIME_REAL") {
+          return jsonResponse({ error: "Realtime Real Trading is disabled (Coming Soon). Paper trading only." }, 403);
+        }
+        if (account.trading_mode === "PREVIOUS_MARKET") {
+          return jsonResponse({ error: "You are in Previous Market Trading mode. Use Historical Replay on the Charts tab, or switch to Realtime Paper Trading for live auto-trading." }, 400);
+        }
         if (account.kill_switch_active) {
           return jsonResponse({ error: "Kill Switch is active. Reset Kill Switch in Account settings first." }, 400);
         }
@@ -843,13 +830,25 @@ Deno.serve(async (req: Request) => {
 
     if (path === "/settings" && req.method === "POST") {
       const body = await req.json();
-      const allowedMode = body.trading_mode === "REAL_LOCKED" ? "REAL_LOCKED" : "PAPER";
+      const rawMode = String(body.trading_mode || "").toUpperCase();
+      const allowedMode =
+        rawMode === "REALTIME_REAL" || rawMode === "REAL_LOCKED"
+          ? "REALTIME_REAL"
+          : rawMode === "PREVIOUS_MARKET"
+          ? "PREVIOUS_MARKET"
+          : "REALTIME_PAPER";
       const allowedAlloc = ["ONE_THIRD", "TWO_THIRDS", "FULL", "CUSTOM"].includes(body.capital_allocation_mode)
         ? body.capital_allocation_mode
         : undefined;
 
       const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
-      if (body.trading_mode !== undefined) patch.trading_mode = allowedMode;
+      if (body.trading_mode !== undefined) {
+        patch.trading_mode = allowedMode;
+        if (allowedMode !== "REALTIME_PAPER") {
+          patch.auto_trade_active = false;
+          patch.last_worker_status = allowedMode === "REALTIME_REAL" ? "REAL_TRADING_DISABLED_COMING_SOON" : "PREVIOUS_MARKET_REPLAY_MODE";
+        }
+      }
       if (allowedAlloc) patch.capital_allocation_mode = allowedAlloc;
       if (body.custom_allocation_amount !== undefined) patch.custom_allocation_amount = Math.max(500, Number(body.custom_allocation_amount));
       if (body.risk_per_trade_pct !== undefined) patch.risk_per_trade_pct = Math.max(0.2, Math.min(15, Number(body.risk_per_trade_pct)));
@@ -1032,6 +1031,8 @@ Deno.serve(async (req: Request) => {
       const body = await req.json();
       const { data: account } = await supabase.from("paper_account").select("*").eq("id", "default").single();
       if (!account) return jsonResponse({ error: "Account not found" }, 404);
+      if (account.trading_mode === "REALTIME_REAL") return jsonResponse({ error: "Realtime Real Trading is disabled (Coming Soon). Paper trading only." }, 403);
+      if (account.trading_mode === "PREVIOUS_MARKET") return jsonResponse({ error: "Switch to Realtime Paper Trading to place live paper orders. Use Historical Replay for Previous Market Trading." }, 400);
       if (account.kill_switch_active) return jsonResponse({ error: "Kill Switch active" }, 400);
 
       const underlying = String(body.underlying || body.symbol || "NIFTY").toUpperCase();
@@ -1153,10 +1154,17 @@ Deno.serve(async (req: Request) => {
 
       if (qty <= 0) return jsonResponse({ error: "Calculated order quantity is zero." }, 400);
 
-      const isLongSide = isCrypto ? direction !== "SELL" : true;
+      const isLongSide = isCrypto || candidate.optionType === "EQ" ? direction !== "SELL" : true;
       const stopLoss = Math.round((isLongSide ? candidate.ltp * (1 - slPct) : candidate.ltp * (1 + slPct)) * 100) / 100;
-      const takeProfit = Math.round((isLongSide ? candidate.ltp * (1 + tpPct) : candidate.ltp * (1 - tpPct)) * 100) / 100;
-      const sigStr = isCrypto ? (direction === "SELL" ? "SELL" : "BUY") : candidate.optionType === "PE" ? "SELL" : "BUY";
+      const takeProfit = Math.round((isLongSide ? candidate.ltp * (1 + tpPct) : Math.max(0.05, candidate.ltp * (1 - tpPct))) * 100) / 100;
+      const sigStr =
+        isCrypto || candidate.optionType === "EQ"
+          ? direction === "SELL"
+            ? "SELL"
+            : "BUY"
+          : candidate.optionType === "PE"
+          ? "SELL"
+          : "BUY";
 
       const synthSig: any = {
         barIndex: 0,
@@ -1288,6 +1296,365 @@ Deno.serve(async (req: Request) => {
         transactions: transactions || [],
         dailySummaries: summaries || [],
       });
+    }
+
+    if (path === "/historical-candles" && req.method === "GET") {
+      const symbol = (url.searchParams.get("symbol") || "NIFTY").trim().toUpperCase();
+      const dateYmd = (url.searchParams.get("date") || indianSession.istDateStr).trim();
+      const tf = (url.searchParams.get("timeframe") || "5m").trim();
+      const isCrypto = isCryptoInstrument(symbol);
+
+      if (isCrypto) {
+        const res = await fetchBitcoinHistoricalCandlesForDate(dateYmd, tf);
+        if (!res.ok) return jsonResponse({ ok: false, error: res.error, candles: [] }, 404);
+        const sessionCandles = res.candles.filter((c) => c.time >= res.sessionStartSec && c.time <= res.sessionEndSec);
+        return jsonResponse({
+          ok: true,
+          symbol: "BITCOIN",
+          displayName: "Bitcoin (BTC/USDT)",
+          exchange: "CRYPTO",
+          date: dateYmd,
+          timeframe: tf,
+          sessionStartSec: res.sessionStartSec,
+          sessionEndSec: res.sessionEndSec,
+          candles: res.candles,
+          sessionCandlesCount: sessionCandles.length,
+          source: res.source,
+        });
+      }
+
+      const spec = await resolveInstrumentSpec(supabase, symbol);
+      if (!spec) {
+        return jsonResponse({ ok: false, error: `Instrument '${symbol}' not found`, candles: [] }, 404);
+      }
+
+      const res = await fetchAngelHistoricalCandlesForDate(supabase, spec.exchange, spec.token, dateYmd, tf);
+      if (!res.ok) return jsonResponse({ ok: false, error: res.error, candles: [] }, 404);
+      const sessionCandles = res.candles.filter((c) => c.time >= res.sessionStartSec && c.time <= res.sessionEndSec);
+      return jsonResponse({
+        ok: true,
+        symbol: spec.symbol,
+        displayName: spec.name,
+        exchange: spec.exchange,
+        token: spec.token,
+        date: dateYmd,
+        timeframe: tf,
+        sessionStartSec: res.sessionStartSec,
+        sessionEndSec: res.sessionEndSec,
+        candles: res.candles,
+        sessionCandlesCount: sessionCandles.length,
+        source: "Angel One SmartAPI Historical",
+      });
+    }
+
+    if (path === "/replay/sessions" && req.method === "GET") {
+      const { data: rows, error } = await supabase
+        .from("replay_sessions")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(25);
+      if (error) return jsonResponse({ error: error.message }, 500);
+      return jsonResponse({ sessions: rows || [] });
+    }
+
+    if (path === "/replay/run" && req.method === "POST") {
+      const body = await req.json();
+      const symbol = String(body.symbol || "NIFTY").trim().toUpperCase();
+      const dateYmd = String(body.date || indianSession.istDateStr).trim();
+      const tf = String(body.timeframe || "5m").trim();
+      const isCrypto = isCryptoInstrument(symbol);
+
+      const { data: account } = await supabase.from("paper_account").select("*").eq("id", "default").single();
+      if (!account) return jsonResponse({ error: "Account not found" }, 404);
+
+      let exchange = "CRYPTO";
+      let token = "BTCUSDT";
+      let lotSize = 1;
+      let strikeStep = 50;
+      let histMain: { ok: true; candles: CandleBar[]; sessionStartSec: number; sessionEndSec: number; source?: string } | { ok: false; error: string };
+      let hist15m: { ok: true; candles: CandleBar[]; sessionStartSec: number; sessionEndSec: number; source?: string } | { ok: false; error: string };
+
+      if (isCrypto) {
+        [histMain, hist15m] = await Promise.all([
+          fetchBitcoinHistoricalCandlesForDate(dateYmd, tf),
+          tf === "15m" ? fetchBitcoinHistoricalCandlesForDate(dateYmd, "15m") : fetchBitcoinHistoricalCandlesForDate(dateYmd, "15m"),
+        ]);
+      } else {
+        const spec = await resolveInstrumentSpec(supabase, symbol);
+        if (!spec) return jsonResponse({ error: `Unknown instrument '${symbol}'` }, 404);
+        exchange = spec.exchange;
+        token = spec.token;
+        if (CORE_INDICES[symbol]) {
+          strikeStep = CORE_INDICES[symbol].strikeStep;
+          const upcoming = await fetchUpcomingExpiries(supabase, symbol, CORE_INDICES[symbol].optionExch, dateYmd, 1);
+          lotSize = upcoming[0]?.lotSize || 25;
+        } else {
+          lotSize = spec.lotSize || 1;
+        }
+        histMain = await fetchAngelHistoricalCandlesForDate(supabase, exchange, token, dateYmd, tf);
+        hist15m = tf === "15m" ? histMain : await fetchAngelHistoricalCandlesForDate(supabase, exchange, token, dateYmd, "15m");
+      }
+
+      if (!histMain.ok) {
+        return jsonResponse({ error: histMain.error }, 400);
+      }
+
+      const allCandles = histMain.candles;
+      const all15m = hist15m.ok ? hist15m.candles : [];
+      const tfSec = getBucketSeconds(tf);
+      const usdInrRate = await fetchUsdInrRate(supabase);
+
+      const initCap = Number(account.initial_capital || 100000);
+      let simAvail = initCap;
+      let peakCap = initCap;
+      let maxDd = 0;
+
+      const replayTrades: any[] = [];
+      const replaySignals: any[] = [];
+      let openPos: any = null;
+      let cooldownUntilSec = 0;
+      const delta = 0.50;
+
+      const simAccount = {
+        ...account,
+        initial_capital: initCap,
+        available_balance: simAvail,
+        invested_amount: 0,
+        __isReplay: true,
+      };
+
+      for (let i = 0; i < allCandles.length; i++) {
+        const bar = allCandles[i];
+        // Skip warmup bars before the selected session date, but keep them in slice [0..i]
+        if (bar.time < histMain.sessionStartSec) continue;
+
+        const sliceMain = allCandles.slice(0, i + 1);
+        if (sliceMain.length < 30) continue;
+
+        const barIst = getIstDate(bar.time * 1000);
+        const hhmm = barIst.getUTCHours() * 60 + barIst.getUTCMinutes();
+
+        // 1. Chronological position management (strictly using current bar OHLC, never future bars)
+        if (openPos) {
+          let exitPx: number | null = null;
+          let exitReason = "";
+
+          if (isCrypto) {
+            const isLong = openPos.side === "BUY";
+            const hitSl = isLong ? bar.low <= openPos.stopLoss : bar.high >= openPos.stopLoss;
+            const hitTp = isLong ? bar.high >= openPos.takeProfit : bar.low <= openPos.takeProfit;
+            if (hitSl) {
+              exitPx = openPos.stopLoss;
+              exitReason = `Stop-Loss Hit @ $${openPos.stopLoss}`;
+            } else if (hitTp) {
+              exitPx = openPos.takeProfit;
+              exitReason = `Target Profit Hit @ $${openPos.takeProfit}`;
+            } else {
+              if (isLong && bar.high >= openPos.entryPrice * 1.012) {
+                openPos.stopLoss = Math.max(openPos.stopLoss, Math.round(openPos.entryPrice * 1.0055 * 100) / 100);
+              } else if (!isLong && bar.low <= openPos.entryPrice * 0.988) {
+                openPos.stopLoss = Math.min(openPos.stopLoss, Math.round(openPos.entryPrice * 0.9945 * 100) / 100);
+              }
+            }
+          } else {
+            // Simulate option premium movement from spot bar OHLC * delta
+            const isBullOpt = openPos.optionType === "CE" || openPos.side === "BUY";
+            const moveHi = isBullOpt ? bar.high - openPos.entrySpot : openPos.entrySpot - bar.low;
+            const moveLo = isBullOpt ? bar.low - openPos.entrySpot : openPos.entrySpot - bar.high;
+            const moveCl = isBullOpt ? bar.close - openPos.entrySpot : openPos.entrySpot - bar.close;
+            const optHi = Math.max(0.5, openPos.entryPrice + moveHi * delta);
+            const optLo = Math.max(0.5, openPos.entryPrice + moveLo * delta);
+            const optCl = Math.max(0.5, openPos.entryPrice + moveCl * delta);
+
+            if (hhmm >= 15 * 60 + 25) {
+              exitPx = optCl;
+              exitReason = "Market Close Square-Off (15:25 IST)";
+            } else if (optLo <= openPos.stopLoss) {
+              exitPx = openPos.stopLoss;
+              exitReason = `Stop-Loss Hit @ ₹${openPos.stopLoss}`;
+            } else if (optHi >= openPos.takeProfit) {
+              exitPx = openPos.takeProfit;
+              exitReason = `Target Profit Hit @ ₹${openPos.takeProfit}`;
+            } else if (optHi >= openPos.entryPrice * 1.15) {
+              openPos.stopLoss = Math.max(openPos.stopLoss, Math.round((openPos.entryPrice + 2.5) * 100) / 100);
+            }
+          }
+
+          if (exitPx !== null) {
+            const isLong = isCrypto ? openPos.side === "BUY" : true;
+            const fillExit = Math.round((isLong ? exitPx * 0.999 : exitPx * 1.001) * 100) / 100;
+            const mult = isCrypto ? usdInrRate : 1;
+            const grossInr = (isLong ? fillExit - openPos.fillEntry : openPos.fillEntry - fillExit) * openPos.quantity * mult;
+            const exitTurnover = fillExit * openPos.quantity * mult;
+            const exitCharges = isCrypto ? calcCryptoFee(exitTurnover) : calcIndianFnOCharges(exitTurnover, false);
+            const netPnlInr = Math.round((grossInr - openPos.entryCharges - exitCharges) * 100) / 100;
+
+            simAvail = Math.round((simAvail + openPos.investedInr + grossInr - exitCharges) * 100) / 100;
+            simAccount.available_balance = simAvail;
+            simAccount.invested_amount = 0;
+            peakCap = Math.max(peakCap, simAvail);
+            maxDd = Math.max(maxDd, peakCap - simAvail);
+
+            replayTrades.push({
+              ...openPos,
+              exitTime: bar.time,
+              exitPrice: fillExit,
+              exitCharges,
+              netPnlInr,
+              exitReason,
+            });
+            openPos = null;
+            cooldownUntilSec = bar.time + 300;
+            continue;
+          }
+        }
+
+        if (openPos || bar.time < cooldownUntilSec) continue;
+        if (!isCrypto && (hhmm < 9 * 60 + 20 || hhmm > 15 * 60 + 10)) continue;
+
+        // 2. Strictly zero-lookahead V12 + AI evaluation on slice [0..i]
+        const v12Series = computeV12Engine(sliceMain);
+        const latestSig = v12Series[v12Series.length - 1];
+        if (!latestSig || latestSig.signal === "HOLD") continue;
+
+        const slice15m = all15m.filter((c15) => c15.time + 900 <= bar.time + tfSec);
+        const isBull = latestSig.signal === "BUY";
+        const atmStrike = Math.round(bar.close / strikeStep) * strikeStep;
+        const estOptionPremium = Math.max(35, Math.round(bar.close * 0.006 * 20) / 20);
+
+        const candidate: AICandidateContract = isCrypto
+          ? {
+              symbol: "BITCOIN",
+              token: "BTCUSDT",
+              exchange: "CRYPTO",
+              optionType: "SPOT",
+              strikePrice: 0,
+              expiryDate: "",
+              lotSize: 1,
+              ltp: bar.close,
+              volume: bar.volume || 0,
+              oi: 0,
+              spreadPct: 0.0005,
+              approxDelta: 1.0,
+            }
+          : {
+              symbol: `${symbol} ${atmStrike} ${isBull ? "CE" : "PE"}`,
+              token: token,
+              exchange: CORE_INDICES[symbol]?.optionExch || exchange,
+              optionType: isBull ? "CE" : "PE",
+              strikePrice: atmStrike,
+              expiryDate: dateYmd,
+              lotSize,
+              ltp: estOptionPremium,
+              volume: Math.max(1000, bar.volume || 5000),
+              oi: 500000,
+              spreadPct: 0.005,
+              approxDelta: delta,
+            };
+
+        const aiEval = evaluateWithAIBrain(latestSig, sliceMain, slice15m, simAccount, candidate, usdInrRate, isCrypto);
+        replaySignals.push({
+          barTime: bar.time,
+          signal: latestSig.signal,
+          decision: aiEval.decision,
+          score: aiEval.score,
+          reason: aiEval.reason,
+          spotPrice: bar.close,
+          contract: candidate.symbol,
+        });
+
+        if (aiEval.decision === "APPROVED") {
+          const isLong = isCrypto ? isBull : true;
+          const fillEntry = Math.round((isLong ? candidate.ltp * 1.001 : candidate.ltp * 0.999) * 100) / 100;
+          const mult = isCrypto ? usdInrRate : 1;
+          const investedInr = Math.round(fillEntry * aiEval.suggestedQuantity * mult * 100) / 100;
+          const entryCharges = isCrypto ? calcCryptoFee(investedInr) : calcIndianFnOCharges(investedInr, true);
+
+          if (simAvail >= investedInr + entryCharges) {
+            simAvail = Math.round((simAvail - investedInr - entryCharges) * 100) / 100;
+            simAccount.available_balance = simAvail;
+            simAccount.invested_amount = investedInr;
+            openPos = {
+              symbol: candidate.symbol,
+              underlying: symbol,
+              optionType: candidate.optionType,
+              side: isCrypto ? latestSig.signal : isBull ? "BUY_CE" : "BUY_PE",
+              quantity: aiEval.suggestedQuantity,
+              lotSize: candidate.lotSize,
+              entryTime: bar.time,
+              entrySpot: bar.close,
+              entryPrice: candidate.ltp,
+              fillEntry,
+              investedInr,
+              entryCharges,
+              stopLoss: aiEval.stopLoss,
+              takeProfit: aiEval.takeProfit,
+              aiScore: aiEval.score,
+              entryReason: aiEval.reason,
+            };
+          }
+        }
+      }
+
+      // Close any leftover open position at final session bar
+      if (openPos) {
+        const lastBar = allCandles[allCandles.length - 1];
+        const isLong = isCrypto ? openPos.side === "BUY" : true;
+        const rawExit = isCrypto
+          ? lastBar.close
+          : Math.max(0.5, openPos.entryPrice + ((openPos.optionType === "CE" ? lastBar.close - openPos.entrySpot : openPos.entrySpot - lastBar.close) * delta));
+        const fillExit = Math.round((isLong ? rawExit * 0.999 : rawExit * 1.001) * 100) / 100;
+        const mult = isCrypto ? usdInrRate : 1;
+        const grossInr = (isLong ? fillExit - openPos.fillEntry : openPos.fillEntry - fillExit) * openPos.quantity * mult;
+        const exitCharges = isCrypto ? calcCryptoFee(fillExit * openPos.quantity * mult) : calcIndianFnOCharges(fillExit * openPos.quantity * mult, false);
+        const netPnlInr = Math.round((grossInr - openPos.entryCharges - exitCharges) * 100) / 100;
+        simAvail = Math.round((simAvail + openPos.investedInr + grossInr - exitCharges) * 100) / 100;
+        replayTrades.push({
+          ...openPos,
+          exitTime: lastBar.time,
+          exitPrice: fillExit,
+          exitCharges,
+          netPnlInr,
+          exitReason: "End of Replay Session",
+        });
+      }
+
+      const wins = replayTrades.filter((t) => t.netPnlInr > 0);
+      const losses = replayTrades.filter((t) => t.netPnlInr <= 0);
+      const grossWin = wins.reduce((s, t) => s + t.netPnlInr, 0);
+      const grossLoss = Math.abs(losses.reduce((s, t) => s + t.netPnlInr, 0));
+      const pf = grossLoss > 0 ? Math.round((grossWin / grossLoss) * 100) / 100 : grossWin > 0 ? 99 : 0;
+      const netPnl = Math.round((simAvail - initCap) * 100) / 100;
+      const winRate = replayTrades.length > 0 ? Math.round((wins.length / replayTrades.length) * 1000) / 10 : 0;
+
+      const { data: savedSession, error: saveErr } = await supabase
+        .from("replay_sessions")
+        .insert({
+          account_id: account.id,
+          symbol,
+          exchange,
+          session_date: dateYmd,
+          timeframe: tf,
+          strategy_version: STRATEGY_VERSION,
+          status: "COMPLETED",
+          initial_capital: initCap,
+          final_capital: simAvail,
+          net_pnl: netPnl,
+          total_trades: replayTrades.length,
+          wins: wins.length,
+          losses: losses.length,
+          win_rate: winRate,
+          max_drawdown: Math.round(maxDd * 100) / 100,
+          profit_factor: pf,
+          candles_count: allCandles.filter((c) => c.time >= histMain.sessionStartSec).length,
+          trades_json: replayTrades,
+          signals_json: replaySignals,
+        })
+        .select("*")
+        .single();
+
+      if (saveErr) return jsonResponse({ error: saveErr.message }, 500);
+      return jsonResponse({ ok: true, session: savedSession });
     }
 
     if (path === "/engine/run-now" && req.method === "POST") {
