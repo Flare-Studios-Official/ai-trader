@@ -1,6 +1,6 @@
 import { SupabaseClient } from "jsr:@supabase/supabase-js@2";
-import { CORE_INDICES, fetchAngelQuotes, AngelQuoteItem } from "./angelOne.ts";
-import { AICandidateContract, AIBrainEvaluation, V12State, computeAllocatedBudget } from "./quantEngine.ts";
+import { CORE_INDICES, fetchAngelQuotes, fetchUpcomingExpiries, AngelQuoteItem } from "./angelOne.ts";
+import { AICandidateContract, AIBrainEvaluation, V12State, computeAllocatedBudget, STRATEGY_VERSION } from "./quantEngine.ts";
 
 export function calcIndianFnOCharges(turnover: number, isBuy: boolean): number {
   const brokerage = 20.0;
@@ -30,24 +30,14 @@ export async function selectRealOptionCandidate(
 
   const optType = isBull ? "CE" : "PE";
 
-  const { data: expRows } = await supabase
-    .from("instrument_master")
-    .select("expiry, expiry_date")
-    .eq("name", underlying)
-    .eq("exch_seg", spec.optionExch)
-    .eq("instrumenttype", "OPTIDX")
-    .gte("expiry_date", istDateStr)
-    .order("expiry_date", { ascending: true })
-    .limit(300);
-
-  if (!expRows || expRows.length === 0) {
+  const upcoming = await fetchUpcomingExpiries(supabase, underlying, spec.optionExch, istDateStr, 3);
+  if (upcoming.length === 0) {
     return { ok: false, reason: `No active expiries found in instrument_master for ${underlying}` };
   }
 
-  const distinctExps = Array.from(new Set(expRows.map((r: any) => r.expiry_date))).sort();
-  let chosenExpDate = distinctExps[0];
-  if (chosenExpDate === istDateStr && istTimeMinutes >= 870 && distinctExps.length > 1) {
-    chosenExpDate = distinctExps[1];
+  let chosenExpDate = upcoming[0].expiryDate;
+  if (chosenExpDate === istDateStr && istTimeMinutes >= 870 && upcoming.length > 1) {
+    chosenExpDate = upcoming[1].expiryDate;
   }
 
   const atm = Math.round(spotPrice / spec.strikeStep) * spec.strikeStep;
@@ -196,6 +186,7 @@ export async function openPaperPosition(
     ai_score: aiEval.score,
     decision_chain: { v12: v12Sig, ai: aiEval },
     data_source: dataSource,
+    strategy_version: STRATEGY_VERSION,
     currency: isCrypto ? "USD" : "INR",
     allocation_mode: account.capital_allocation_mode,
     opened_at: nowIso,
