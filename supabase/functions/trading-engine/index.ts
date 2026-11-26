@@ -22,6 +22,7 @@ import {
   computeAllocatedBudget,
   computeV12Engine,
   evaluateWithAIBrain,
+  STRATEGY_VERSION,
 } from "../_shared/quantEngine.ts";
 import { closePaperPosition, openPaperPosition, selectRealOptionCandidate } from "../_shared/paperBroker.ts";
 
@@ -150,13 +151,10 @@ async function refreshAllLiveQuotes(
   const quoteByExchToken = new Map<string, AngelQuoteItem>();
   let angelError: string | null = null;
 
-  if (!isAngelConfigured()) {
-    angelError = "Angel One SmartAPI secrets missing in Edge Function secrets";
+  const qRes = await fetchAngelQuotes(supabase, exchangeTokens);
+  if (!qRes.ok) {
+    angelError = qRes.error;
   } else {
-    const qRes = await fetchAngelQuotes(supabase, exchangeTokens);
-    if (!qRes.ok) {
-      angelError = qRes.error;
-    } else {
       for (const item of qRes.fetched) {
         const key = `${item.exchange}:${item.symbolToken}`;
         const meta = tokenMeta.get(key);
@@ -186,7 +184,6 @@ async function refreshAllLiveQuotes(
           });
         }
       }
-    }
   }
 
   if (angelError) {
@@ -270,11 +267,24 @@ async function evaluateAndUpdatePositions(
       await closePaperPosition(supabase, account, pos, livePx, closeReason, usdInrRate);
       closedCount++;
     } else {
+      // Breakeven trailing stop protection once sufficiently in profit
+      let nextStopLoss = Number(pos.stop_loss);
+      if (isCrypto) {
+        if (isLong && livePx >= entryPx * 1.012) {
+          nextStopLoss = Math.max(nextStopLoss, Math.round(entryPx * 1.0055 * 100) / 100);
+        } else if (!isLong && livePx <= entryPx * 0.988) {
+          nextStopLoss = Math.min(nextStopLoss, Math.round(entryPx * 0.9945 * 100) / 100);
+        }
+      } else if (isLong && livePx >= entryPx * 1.15) {
+        nextStopLoss = Math.max(nextStopLoss, Math.round((entryPx + 2.5) * 100) / 100);
+      }
+
       openUnrealizedInr += unrealizedInr;
       await supabase
         .from("positions")
         .update({
           current_price: livePx,
+          stop_loss: nextStopLoss,
           unrealized_pnl: unrealizedInr,
           updated_at: new Date().toISOString(),
         })
@@ -428,7 +438,14 @@ Deno.serve(async (req: Request) => {
     if (freshAcc) account = freshAcc;
 
     let workerStatus = "IDLE";
-    if (!account.auto_trade_active) {
+    if (account.trading_mode === "REALTIME_REAL") {
+      workerStatus = "REAL_TRADING_DISABLED_COMING_SOON";
+      if (account.auto_trade_active) {
+        await supabase.from("paper_account").update({ auto_trade_active: false, last_worker_status: workerStatus, updated_at: nowIso }).eq("id", account.id);
+      }
+    } else if (account.trading_mode === "PREVIOUS_MARKET") {
+      workerStatus = "PREVIOUS_MARKET_REPLAY_MODE";
+    } else if (!account.auto_trade_active) {
       workerStatus = "AUTO_TRADE_OFF";
     } else if (!isCryptoSelected && !indianSession.isOpen) {
       await supabase.from("paper_account").update({
@@ -681,6 +698,7 @@ Deno.serve(async (req: Request) => {
                       factor_breakdown: aiEval.breakdown,
                       warnings: aiEval.warnings,
                       data_source: dataSrcLabel,
+                      strategy_version: STRATEGY_VERSION,
                       created_at: nowIso,
                     }, { onConflict: "account_id,symbol,timeframe,bar_timestamp" });
 
